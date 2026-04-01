@@ -41,11 +41,18 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def fetch_data(ticker, years):
-    end   = datetime.today()
-    start = end - timedelta(days=365 * years)
-    df = yf.download(ticker, start=start, end=end, interval="1wk",
-                     auto_adjust=True, progress=False)
-    df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+    # 用 Ticker.history() 取代 yf.download()
+    # 對台股（.TW / .TWO）相容性更好，不會有 MultiIndex 欄位問題
+    t   = yf.Ticker(ticker)
+    period_map = {1: "1y", 2: "2y", 3: "3y", 4: "5y", 5: "5y"}
+    period = period_map.get(years, "3y")
+    df = t.history(period=period, interval="1wk", auto_adjust=True)
+
+    # history() 回傳欄位名稱固定為英文，直接使用
+    # 保留需要的欄位，移除 Dividends / Stock Splits
+    keep = [c for c in ['Open','High','Low','Close','Volume'] if c in df.columns]
+    df = df[keep].copy()
+    df.index = df.index.tz_localize(None)   # 去除時區資訊，避免後續比較問題
     df.dropna(inplace=True)
     return df
 
