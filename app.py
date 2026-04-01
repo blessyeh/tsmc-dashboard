@@ -147,43 +147,86 @@ def fetch_market_env(interval):
     except:
         return None
 
+def _parse_twse_net(raw: str) -> int:
+    """將 TWSE 回傳數字字串轉整數（處理全形負號、千分位逗號）"""
+    s = raw.replace(',', '').replace('−', '-').replace('－', '-').strip()
+    try:
+        return int(s) if s and s not in ('--', '') else 0
+    except ValueError:
+        return 0
+
+def _recent_trading_days(n: int) -> list:
+    """回傳最近 n 個交易日清單（跳過週六日）格式 YYYYMMDD"""
+    dates, d = [], datetime.now()
+    while len(dates) < n:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:
+            dates.append(d.strftime('%Y%m%d'))
+    return dates
+
 @st.cache_data(ttl=1800)
 def fetch_institutional(ticker):
-    """從 TWSE 抓取外資買賣超（僅限 .TW 股票）"""
+    """從 TWSE 抓外資買賣超（僅限 .TW 上市股）"""
     if not ticker.endswith('.TW'):
         return None
     stock_code = ticker.replace('.TW', '')
-    records = []
 
-    for i in range(8):
-        date_str = (datetime.now() - timedelta(days=i+1)).strftime('%Y%m%d')
-        try:
-            url  = f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALLBUT0999"
-            resp = requests.get(url, timeout=6, headers={'User-Agent': 'Mozilla/5.0'})
-            if resp.status_code != 200:
-                continue
-            data = resp.json()
-            if data.get('stat') != 'OK':
-                continue
-            for row in data.get('data', []):
-                if len(row) > 4 and row[0] == stock_code:
-                    try:
-                        net_str = row[4].replace(',', '').replace('－', '-').strip()
-                        if not net_str or net_str == '--':
-                            net_str = '0'
-                        records.append({'date': date_str, 'foreign_net': int(net_str)})
-                    except:
-                        pass
-                    break
-            if len(records) >= 5:
+    # Step 1：建立 Session，先拜訪首頁取得 Cookie
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent':       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                            'AppleWebKit/537.36 (KHTML, like Gecko) '
+                            'Chrome/124.0.0.0 Safari/537.36',
+        'Accept':           'application/json, text/javascript, */*; q=0.01',
+        'Accept-Language':  'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer':          'https://www.twse.com.tw/zh/trading/fund/T86.html',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Connection':       'keep-alive',
+    })
+    try:
+        session.get(
+            'https://www.twse.com.tw/zh/trading/fund/T86.html',
+            timeout=8
+        )
+    except Exception:
+        pass  # 首頁失敗仍繼續
+
+    # Step 2：逐日查詢，跳過週末，新舊端點雙備援
+    records = []
+    endpoints = [
+        'https://www.twse.com.tw/rwd/zh/fund/T86?response=json&date={d}&selectType=ALLBUT0999',
+        'https://www.twse.com.tw/fund/T86?response=json&date={d}&selectType=ALLBUT0999',
+    ]
+
+    for date_str in _recent_trading_days(10):
+        if len(records) >= 5:
+            break
+        got = False
+        for tmpl in endpoints:
+            if got:
                 break
-        except:
-            pass
+            try:
+                resp = session.get(tmpl.format(d=date_str), timeout=10)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                if data.get('stat') != 'OK':
+                    break  # 該日休市或無資料，換下一天
+                for row in data.get('data', []):
+                    if len(row) > 4 and row[0] == stock_code:
+                        records.append({
+                            'date':        date_str,
+                            'foreign_net': _parse_twse_net(row[4]),
+                        })
+                        got = True
+                        break
+            except Exception:
+                continue
 
     if not records:
         return None
 
-    records = sorted(records, key=lambda x: x['date'], reverse=True)
+    records.sort(key=lambda x: x['date'], reverse=True)
     for r in records:
         r['is_buy'] = r['foreign_net'] > 0
 
