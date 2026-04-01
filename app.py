@@ -28,7 +28,7 @@ st.set_page_config(
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.title("⚙️ 分析設定")
-    ticker   = st.selectbox("股票代碼", ["2330.TW", "2317.TW", "2454.TW", "TSM"], index=0)
+    ticker   = st.selectbox("股票代碼", ["2330.TW", "2850.TW","2317.TW", "2454.TW", "TSM"], index=0)
     years    = st.slider("歷史資料年數", 1, 5, 3)
     rsi_low  = st.slider("RSI 超賣門檻", 20, 45, 40)
     score_th = st.slider("低點訊號最低評分", 2, 5, 3)
@@ -265,3 +265,134 @@ if not strong_signals.empty:
     }), use_container_width=True)
 
 st.caption(f"⏱ 資料更新：{df.index[-1].strftime('%Y/%m/%d')}  |  ⚠️ 本工具僅供技術分析參考，非投資建議")
+
+# ─────────────────────────────────────────────
+# 當前指標綜合說明
+# ─────────────────────────────────────────────
+st.markdown("---")
+st.subheader("🔍 當前技術指標綜合分析說明")
+
+last  = df.iloc[-1]
+prev  = df.iloc[-2]
+score = int(last['signal_score'])
+
+# ── 整體研判 ──────────────────────────────────
+if score >= 4:
+    overall_icon  = "🟢"
+    overall_label = "偏多（相對低點訊號明顯）"
+    overall_desc  = f"目前共有 **{score} 項**技術指標同時出現低點共振，歷史上類似位置多為中線相對低點，可關注是否出現止跌訊號。"
+elif score == 3:
+    overall_icon  = "🟡"
+    overall_label = "中性偏多（弱低點訊號）"
+    overall_desc  = f"目前有 **{score} 項**指標出現低點訊號，訊號強度中等，建議搭配其他資訊綜合判斷，尚未到強力介入時機。"
+elif score == 2:
+    overall_icon  = "🟡"
+    overall_label = "中性（觀察訊號）"
+    overall_desc  = f"目前有 **{score} 項**指標偏低點方向，尚未形成明顯共振，建議持續觀察下週走勢。"
+elif last['RSI'] > 65 or last['K'] > 75:
+    overall_icon  = "🔴"
+    overall_label = "偏空（指標偏高）"
+    overall_desc  = "目前多項指標處於相對高點或中性區間，低點訊號評分偏低，不建議追高。"
+else:
+    overall_icon  = "⚪"
+    overall_label = "中性（無明顯訊號）"
+    overall_desc  = "目前各指標均處於中性區間，無明顯高低點訊號，適合觀望等待更清晰的方向。"
+
+st.markdown(f"### {overall_icon} 整體研判：{overall_label}")
+st.info(overall_desc)
+
+# ── 各指標分析 ────────────────────────────────
+col_a, col_b = st.columns(2)
+
+with col_a:
+    rsi_val = last['RSI']
+    if rsi_val < rsi_low:
+        rsi_status = f"🟢 超賣區（{rsi_val:.1f}），動能偏弱但反彈機率上升"
+    elif rsi_val > 70:
+        rsi_status = f"🔴 超買區（{rsi_val:.1f}），短期漲幅過大，留意回調風險"
+    else:
+        rsi_status = f"🟡 中性區（{rsi_val:.1f}），無明顯超買超賣訊號"
+
+    k_val, d_val = last['K'], last['D']
+    kd_cross = ""
+    if k_val > d_val and prev['K'] <= prev['D']:
+        kd_cross = "，**本週出現黃金交叉**，動能轉正"
+    elif k_val < d_val and prev['K'] >= prev['D']:
+        kd_cross = "，**本週出現死亡交叉**，動能轉弱"
+    if k_val < 25:
+        kd_status = f"🟢 超賣區（K:{k_val:.1f} D:{d_val:.1f}）{kd_cross}"
+    elif k_val > 75:
+        kd_status = f"🔴 超買區（K:{k_val:.1f} D:{d_val:.1f}）{kd_cross}"
+    else:
+        kd_status = f"🟡 中性（K:{k_val:.1f} D:{d_val:.1f}）{kd_cross}"
+
+    hist_val  = last['MACD_hist']
+    hist_prev = prev['MACD_hist']
+    if hist_val > 0 and hist_prev <= 0:
+        macd_status = f"🟢 MACD柱本週由負轉正（{hist_val:.2f}），動能出現反轉訊號"
+    elif hist_val < 0 and hist_prev >= 0:
+        macd_status = f"🔴 MACD柱本週由正轉負（{hist_val:.2f}），動能開始走弱"
+    elif hist_val > 0:
+        macd_status = f"🟢 MACD柱持續為正（{hist_val:.2f}），多頭動能延續"
+    else:
+        macd_status = f"🔴 MACD柱持續為負（{hist_val:.2f}），空頭動能延續中"
+
+    st.markdown("**📊 動能指標**")
+    st.markdown(f"- **RSI(14)**：{rsi_status}")
+    st.markdown(f"- **KD(9,3,3)**：{kd_status}")
+    st.markdown(f"- **MACD**：{macd_status}")
+
+with col_b:
+    bb_pct  = last['BB_pct'] * 100
+    bb_low  = last['BB_lower']
+    bb_high = last['BB_upper']
+    if bb_pct < 20:
+        bb_status = f"🟢 接近下軌（%B:{bb_pct:.1f}%，下軌 {bb_low:.1f}），統計上偏離均值過大，回歸機率提升"
+    elif bb_pct > 80:
+        bb_status = f"🔴 接近上軌（%B:{bb_pct:.1f}%，上軌 {bb_high:.1f}），留意過熱風險"
+    else:
+        bb_status = f"🟡 位於通道中段（%B:{bb_pct:.1f}%），無極端偏離"
+
+    close_val = last['Close']
+    ma13, ma26, ma52 = last['MA13'], last['MA26'], last['MA52']
+    above_count = sum(1 for m in [ma13, ma26, ma52] if close_val > m)
+    ma_icon = "🟢" if above_count == 3 else ("🟡" if above_count >= 1 else "🔴")
+    ma_lines = []
+    ma_lines.append(f"{'站上' if close_val > ma13 else '跌破'}季線（{ma13:.1f}）")
+    ma_lines.append(f"{'站上' if close_val > ma26 else '跌破'}半年線（{ma26:.1f}）")
+    ma_lines.append(f"{'站上' if close_val > ma52 else '跌破'}年線（{ma52:.1f}）")
+    ma_status = f"{ma_icon} 站上 {above_count}/3 條均線：" + "、".join(ma_lines)
+
+    vol_val   = last['Volume']
+    vol_ma5   = last['Vol_MA5']
+    vol_ratio = vol_val / vol_ma5 if vol_ma5 > 0 else 1
+    if vol_ratio < 0.7:
+        vol_status = f"🟢 量能萎縮（均量的 {vol_ratio*100:.0f}%），籌碼沉澱，低點特徵之一"
+    elif vol_ratio > 1.5:
+        vol_status = f"🔴 量能放大（均量的 {vol_ratio*100:.0f}%），需觀察是否量價背離"
+    else:
+        vol_status = f"🟡 量能正常（均量的 {vol_ratio*100:.0f}%），無異常"
+
+    st.markdown("**📐 結構指標**")
+    st.markdown(f"- **布林通道**：{bb_status}")
+    st.markdown(f"- **均線位置**：{ma_status}")
+    st.markdown(f"- **成交量**：{vol_status}")
+
+# ── 低點評分明細 ──────────────────────────────
+with st.expander("📋 低點評分明細（共 7 項條件）"):
+    cond_results = [
+        ("RSI < 超賣門檻",        bool(last['RSI'] < rsi_low),                           f"RSI={last['RSI']:.1f}，門檻={rsi_low}"),
+        ("收盤 ≤ 布林下軌 ×1.02", bool(last['Close'] <= last['BB_lower']*1.02),           f"收盤={last['Close']:.1f}，下軌={last['BB_lower']:.1f}"),
+        ("K值 < 25（KD超賣）",     bool(last['K'] < 25),                                  f"K={last['K']:.1f}"),
+        ("KD 黃金交叉",            bool(last['K'] > last['D'] and prev['K'] <= prev['D']),f"K={last['K']:.1f} D={last['D']:.1f}"),
+        ("MACD柱由負轉正",         bool(last['MACD_hist'] > 0 and prev['MACD_hist'] <= 0),f"本週={last['MACD_hist']:.2f}，上週={prev['MACD_hist']:.2f}"),
+        ("收盤 ≥ 季線 ×0.9",       bool(last['Close'] >= last['MA13']*0.9),               f"收盤={last['Close']:.1f}，季線90%={last['MA13']*0.9:.1f}"),
+        ("成交量低於5週均量",       bool(last['Volume'] < last['Vol_MA5']),                f"本週量={last['Volume']/1e8:.2f}億，均量={last['Vol_MA5']/1e8:.2f}億"),
+    ]
+    for name, passed, detail in cond_results:
+        icon = "✅" if passed else "❌"
+        st.markdown(f"{icon} **{name}**　*（{detail}）*")
+    label = "→ 強低點訊號" if score >= score_th else ("→ 觀察訊號" if score == score_th-1 else "→ 無明顯低點訊號")
+    st.markdown(f"**合計：{score} / 7 項條件成立　{label}**")
+
+st.markdown("> ⚠️ **免責聲明**：以上分析純為技術面參考，不構成任何投資建議。股市有風險，投資需謹慎。")
