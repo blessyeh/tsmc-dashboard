@@ -167,15 +167,15 @@ def _recent_trading_days(n: int) -> list:
 @st.cache_data(ttl=1800)
 def fetch_institutional(ticker):
     """
-    從 FinMind 公開 API 抓取外資買賣超（近 30 個交易日）
-    免費無需 Token，支援台灣上市股票
-    API: https://finmindtrade.com/
+    外資買賣超：FinMind API 為主，TWSE OpenAPI 為備援
+    回傳 dict 或 {'error': str} 以便前端顯示診斷訊息
     """
     if not ticker.endswith('.TW'):
         return None
     stock_code = ticker.replace('.TW', '')
     start_date = (datetime.now() - timedelta(days=45)).strftime('%Y-%m-%d')
 
+    # ── 方法 A：FinMind 公開 API ──────────────────────────────────────────────
     try:
         url = (
             'https://api.finmindtrade.com/api/v4/data'
@@ -186,47 +186,70 @@ def fetch_institutional(ticker):
         resp = requests.get(url, timeout=15, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         })
-        if resp.status_code != 200:
-            return None
-        payload = resp.json()
-        if payload.get('status') != 200 or not payload.get('data'):
-            return None
+        if resp.status_code == 200:
+            payload = resp.json()
+            if payload.get('status') == 200 and payload.get('data'):
+                from collections import defaultdict
+                daily = defaultdict(int)
+                for row in payload['data']:
+                    name = row.get('name', '')
+                    if '外陸資' in name or '外資自營商' in name:
+                        net = (int(row.get('buy', 0)) - int(row.get('sell', 0))) // 1000
+                        daily[row['date']] += net
+                if daily:
+                    sorted_dates = sorted(daily.keys(), reverse=True)[:10]
+                    records = [{'date': d, 'foreign_net': daily[d]} for d in sorted_dates]
+                    for r in records:
+                        r['is_buy'] = r['foreign_net'] > 0
+                    consecutive_buy = sum(1 for _ in
+                        __import__('itertools').takewhile(lambda r: r['is_buy'], records))
+                    total_5d = sum(r['foreign_net'] for r in records[:5])
+                    return {
+                        'source':          'FinMind',
+                        'records':         records[:10],
+                        'consecutive_buy': consecutive_buy,
+                        'total_net_5d':    total_5d,
+                        'latest_net':      records[0]['foreign_net'],
+                        'bullish':         consecutive_buy >= 3 or (consecutive_buy >= 1 and total_5d > 0),
+                    }
+            finmind_err = f"FinMind status={payload.get('status')}, msg={payload.get('msg','')}"
+        else:
+            finmind_err = f"FinMind HTTP {resp.status_code}"
+    except Exception as e:
+        finmind_err = f"FinMind exception: {e}"
 
-        # 每筆為單一法人單日，外資 = 外陸資 + 外資自營商
-        from collections import defaultdict
-        daily = defaultdict(int)
-        for row in payload['data']:
-            name = row.get('name', '')
-            if '外陸資' in name or '外資自營商' in name:
-                # FinMind 單位為「股」，÷1000 換算為「張」
-                net = (int(row.get('buy', 0)) - int(row.get('sell', 0))) // 1000
-                daily[row['date']] += net
+    # ── 方法 B：TWSE OpenAPI（只有當日資料，無歷史）─────────────────────────
+    try:
+        url2  = 'https://openapi.twse.com.tw/v1/fund/T86'
+        resp2 = requests.get(url2, timeout=12, headers={
+            'User-Agent': 'Mozilla/5.0',
+            'accept': 'application/json',
+        })
+        if resp2.status_code == 200:
+            rows = resp2.json()
+            for row in rows:
+                if row.get('Code') == stock_code:
+                    try:
+                        net = (int(str(row.get('Foreign_Investors_Buy','0')).replace(',',''))
+                             - int(str(row.get('Foreign_Investors_Sell','0')).replace(',',''))) // 1000
+                        today = datetime.now().strftime('%Y-%m-%d')
+                        records = [{'date': today, 'foreign_net': net, 'is_buy': net > 0}]
+                        return {
+                            'source':          'TWSE OpenAPI（僅今日）',
+                            'records':         records,
+                            'consecutive_buy': 1 if net > 0 else 0,
+                            'total_net_5d':    net,
+                            'latest_net':      net,
+                            'bullish':         net > 0,
+                        }
+                    except Exception:
+                        pass
+        twse_err = f"TWSE OpenAPI HTTP {resp2.status_code}"
+    except Exception as e:
+        twse_err = f"TWSE OpenAPI exception: {e}"
 
-        if not daily:
-            return None
-
-        sorted_dates = sorted(daily.keys(), reverse=True)[:10]
-        records = [{'date': d, 'foreign_net': daily[d]} for d in sorted_dates]
-        for r in records:
-            r['is_buy'] = r['foreign_net'] > 0
-
-        consecutive_buy = 0
-        for r in records:
-            if r['is_buy']:
-                consecutive_buy += 1
-            else:
-                break
-
-        total_5d = sum(r['foreign_net'] for r in records[:5])
-        return {
-            'records':         records[:10],
-            'consecutive_buy': consecutive_buy,
-            'total_net_5d':    total_5d,
-            'latest_net':      records[0]['foreign_net'],
-            'bullish':         consecutive_buy >= 3 or (consecutive_buy >= 1 and total_5d > 0),
-        }
-    except Exception:
-        return None
+    # 兩個來源都失敗，回傳錯誤診斷
+    return {'error': f"{finmind_err} | {twse_err}"}
 
 
 # ─────────────────────────────────────────────
@@ -656,7 +679,7 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
     # ── 外資籌碼 ───────────────────────────────────
     if ticker.endswith('.TW'):
         st.markdown("**🏦 外資籌碼（近5日，TWSE）**")
-        if institutional:
+        if institutional and isinstance(institutional, dict) and 'error' not in institutional:
             consec = institutional['consecutive_buy']
             total  = institutional['total_net_5d']
             latest = institutional['latest_net']
@@ -684,7 +707,8 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
                 inst_df = inst_df[['date','方向','買賣超（張）']].rename(columns={'date':'日期'})
                 st.dataframe(inst_df, width='stretch', hide_index=True)
         else:
-            st.caption("外資資料暫時無法取得，請稍後再試（資料來源：FinMind 公開 API）")
+            err_msg = institutional.get('error', '未知錯誤') if isinstance(institutional, dict) else '回傳格式異常'
+            st.warning(f"⚠️ 外資資料無法取得｜{err_msg}")
 
     # ── 完整明細（可展開）────────────────────────────
     with st.expander("📋 10項評分條件完整明細"):
@@ -784,6 +808,13 @@ if run_clicked:
 
 elif st.session_state.df is None:
     st.info("👈 請在左側設定股票代碼與週期，再按「執行分析」開始")
+    st.stop()
+elif st.session_state.last_query != query_key:
+    # 設定已變更（如切換週期），舊 df 的欄位不符，必須重新執行
+    st.warning(
+        f"⚙️ 設定已變更（{st.session_state.last_query} → {query_key}），"
+        "請按「執行分析」重新載入資料。"
+    )
     st.stop()
 
 df            = st.session_state.df
