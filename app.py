@@ -272,8 +272,8 @@ def fetch_per_river(ticker, years=5):
         per_df['date'] = pd.to_datetime(per_df['date'])
         per_df = per_df.set_index('date').sort_index()
         per_df['PER'] = pd.to_numeric(per_df['PER'], errors='coerce')
-        per_df['stock_price'] = pd.to_numeric(per_df['stock_price'], errors='coerce')
-        per_df = per_df[['PER', 'stock_price']].dropna()
+        # FinMind TaiwanStockPER 無 stock_price 欄位，只保留 PER
+        per_df = per_df[['PER']].dropna()
 
         # ── 每季 EPS（用於計算河流帶）────────────────────────────────────────
         url_eps = (
@@ -311,12 +311,15 @@ def fetch_per_river(ticker, years=5):
             eps_latest = float(eps_annual.dropna().iloc[-1])
         else:
             # 備援：從歷史 PER × 目前股價反推隱含帶狀
-            price_series = per_df['stock_price']
-            implied_eps  = price_series / per_df['PER'].replace(0, np.nan)
-            daily_eps_implied = implied_eps.rolling(60, min_periods=1).median()
-            for m in multiples:
-                band_df[f'{m}x'] = daily_eps_implied * m
-            eps_latest = float(daily_eps_implied.dropna().iloc[-1])
+            # 無股價資料備援：用 PER 百分位數推算各帶「合理價格」
+            # 以近期 PER 均值 × 各分位推算（注意：band_df 填入的是「股價帶」需搭配外部股價）
+            # 此備援模式帶狀線以「歷史平均 PER ± 倍數比例」表示，呈現意義為相對位置
+            valid_per_vals = per_df['PER'].replace(0, np.nan).dropna()
+            q_vals = [0.1, 0.25, 0.5, 0.75, 0.9]
+            q_pers = valid_per_vals.quantile(q_vals)
+            # 這裡 band_df 先填空，交由 build_per_chart 用外部股價自行計算
+            eps_latest = 0.0
+            band_df = pd.DataFrame(index=per_df.index)  # 空的，由圖表函數處理
 
         band_df = band_df.dropna(how='all')
 
@@ -356,12 +359,23 @@ def fetch_per_river(ticker, years=5):
         return {'error': str(e)}
 
 
-def build_per_chart(per_data, ticker):
-    """建立本益比河流圖（Plotly）"""
+def build_per_chart(per_data, ticker, price_series=None):
+    """建立本益比河流圖（Plotly）
+    price_series：外部日收盤價 pd.Series（index=DatetimeIndex），用於疊加股價線及推算 EPS 帶
+    """
     per_df    = per_data['per_df']
-    band_df   = per_data['band_df']
+    band_df   = per_data.get('band_df', pd.DataFrame())
     multiples = per_data['multiples']
     colors    = per_data['band_colors']
+
+    # 若 band_df 是空的（備援模式），用外部股價反推 implied EPS 重新建帶
+    if band_df.empty and price_series is not None:
+        price_aligned = price_series.reindex(per_df.index, method='ffill')
+        implied_eps   = price_aligned / per_df['PER'].replace(0, np.nan)
+        daily_eps_imp = implied_eps.rolling(60, min_periods=1).median()
+        for m in multiples:
+            band_df[f'{m}x'] = daily_eps_imp * m
+        band_df = band_df.dropna(how='all')
 
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
@@ -426,12 +440,14 @@ def build_per_chart(per_data, ticker):
                 showlegend=True
             ), row=1, col=1)
 
-    # 股價線
-    fig.add_trace(go.Scatter(
-        x=per_df.index, y=per_df['stock_price'],
-        name='股價', line=dict(color='white', width=2),
-        hovertemplate='%{x|%Y-%m-%d}<br>股價：%{y:.1f}<extra></extra>'
-    ), row=1, col=1)
+    # 股價線（使用外部 yfinance 日收盤價）
+    if price_series is not None:
+        price_plot = price_series.reindex(per_df.index, method='ffill').dropna()
+        fig.add_trace(go.Scatter(
+            x=price_plot.index, y=price_plot,
+            name='股價', line=dict(color='white', width=2),
+            hovertemplate='%{x|%Y-%m-%d}<br>股價：%{y:.1f}<extra></extra>'
+        ), row=1, col=1)
 
     # ── 歷史 PER 線 ────────────────────────────────────────────────
     valid = per_df['PER'].replace(0, np.nan)
@@ -1125,7 +1141,15 @@ if per_data and 'stats' in per_data:
     }
     st.info(zone_msgs.get(ps['zone'], ''))
 
-    per_fig = build_per_chart(per_data, ticker)
+    # 取得日K收盤價（用 yfinance，確保頻率是日線）
+    try:
+        _t = yf.Ticker(ticker)
+        _price_df = _t.history(period='5y', interval='1d', auto_adjust=True)
+        _price_df.index = _price_df.index.tz_localize(None)
+        price_series_for_per = _price_df['Close']
+    except Exception:
+        price_series_for_per = None
+    per_fig = build_per_chart(per_data, ticker, price_series=price_series_for_per)
     st.plotly_chart(per_fig, width='stretch')
 
     st.caption(
