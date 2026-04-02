@@ -176,6 +176,9 @@ def fetch_institutional(ticker):
     start_date = (datetime.now() - timedelta(days=45)).strftime('%Y-%m-%d')
 
     # ── 方法 A：FinMind 公開 API ──────────────────────────────────────────────
+    # FinMind name 欄位實際值（依版本不同可能為以下任一）：
+    #   "外資及陸資(不含外資自營商)"、"外陸資(不含外資自營商)"、"外資自營商"
+    # 用最寬鬆的 '外資' 關鍵字比對，避免漏抓
     try:
         url = (
             'https://api.finmindtrade.com/api/v4/data'
@@ -188,12 +191,16 @@ def fetch_institutional(ticker):
         })
         if resp.status_code == 200:
             payload = resp.json()
-            if payload.get('status') == 200 and payload.get('data'):
+            raw_data = payload.get('data', [])
+            if payload.get('status') == 200 and raw_data:
                 from collections import defaultdict
-                daily = defaultdict(int)
-                for row in payload['data']:
+                daily      = defaultdict(int)
+                seen_names = set()
+                for row in raw_data:
                     name = row.get('name', '')
-                    if '外陸資' in name or '外資自營商' in name:
+                    seen_names.add(name)
+                    # 比對外資（含所有外資相關法人，排除投信/自營商）
+                    if '外資' in name:
                         net = (int(row.get('buy', 0)) - int(row.get('sell', 0))) // 1000
                         daily[row['date']] += net
                 if daily:
@@ -201,8 +208,10 @@ def fetch_institutional(ticker):
                     records = [{'date': d, 'foreign_net': daily[d]} for d in sorted_dates]
                     for r in records:
                         r['is_buy'] = r['foreign_net'] > 0
-                    consecutive_buy = sum(1 for _ in
-                        __import__('itertools').takewhile(lambda r: r['is_buy'], records))
+                    consecutive_buy = 0
+                    for r in records:
+                        if r['is_buy']: consecutive_buy += 1
+                        else: break
                     total_5d = sum(r['foreign_net'] for r in records[:5])
                     return {
                         'source':          'FinMind',
@@ -212,16 +221,21 @@ def fetch_institutional(ticker):
                         'latest_net':      records[0]['foreign_net'],
                         'bullish':         consecutive_buy >= 3 or (consecutive_buy >= 1 and total_5d > 0),
                     }
-            finmind_err = f"FinMind status={payload.get('status')}, msg={payload.get('msg','')}"
+                # FinMind 回傳資料但比對不到外資，附上實際名稱供診斷
+                finmind_err = f"FinMind 有資料但外資名稱未匹配，實際 name 值：{seen_names}"
+            else:
+                finmind_err = f"FinMind status={payload.get('status')}, msg={payload.get('msg','')}, rows={len(raw_data)}"
         else:
             finmind_err = f"FinMind HTTP {resp.status_code}"
     except Exception as e:
         finmind_err = f"FinMind exception: {e}"
 
-    # ── 方法 B：TWSE OpenAPI（只有當日資料，無歷史）─────────────────────────
+    # ── 方法 B：TWSE OpenAPI（忽略 SSL 憑證，僅限當日）───────────────────────
     try:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         url2  = 'https://openapi.twse.com.tw/v1/fund/T86'
-        resp2 = requests.get(url2, timeout=12, headers={
+        resp2 = requests.get(url2, timeout=12, verify=False, headers={
             'User-Agent': 'Mozilla/5.0',
             'accept': 'application/json',
         })
@@ -230,8 +244,10 @@ def fetch_institutional(ticker):
             for row in rows:
                 if row.get('Code') == stock_code:
                     try:
-                        net = (int(str(row.get('Foreign_Investors_Buy','0')).replace(',',''))
-                             - int(str(row.get('Foreign_Investors_Sell','0')).replace(',',''))) // 1000
+                        def _int(v):
+                            return int(str(v).replace(',', '').replace(' ', '') or '0')
+                        net = (_int(row.get('Foreign_Investors_Buy', 0))
+                             - _int(row.get('Foreign_Investors_Sell', 0))) // 1000
                         today = datetime.now().strftime('%Y-%m-%d')
                         records = [{'date': today, 'foreign_net': net, 'is_buy': net > 0}]
                         return {
@@ -242,8 +258,9 @@ def fetch_institutional(ticker):
                             'latest_net':      net,
                             'bullish':         net > 0,
                         }
-                    except Exception:
-                        pass
+                    except Exception as e2:
+                        twse_err = f"TWSE row parse error: {e2}"
+                        break
         twse_err = f"TWSE OpenAPI HTTP {resp2.status_code}"
     except Exception as e:
         twse_err = f"TWSE OpenAPI exception: {e}"
