@@ -200,7 +200,7 @@ def fetch_institutional(ticker):
                     name = row.get('name', '')
                     seen_names.add(name)
                     # 比對外資（含所有外資相關法人，排除投信/自營商）
-                    if '外資' in name:
+                    if name in ('Foreign_Investor', 'Foreign_Dealer_Self'):
                         net = (int(row.get('buy', 0)) - int(row.get('sell', 0))) // 1000
                         daily[row['date']] += net
                 if daily:
@@ -230,43 +230,10 @@ def fetch_institutional(ticker):
     except Exception as e:
         finmind_err = f"FinMind exception: {e}"
 
-    # ── 方法 B：TWSE OpenAPI（忽略 SSL 憑證，僅限當日）───────────────────────
-    try:
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        url2  = 'https://openapi.twse.com.tw/v1/fund/T86'
-        resp2 = requests.get(url2, timeout=12, verify=False, headers={
-            'User-Agent': 'Mozilla/5.0',
-            'accept': 'application/json',
-        })
-        if resp2.status_code == 200:
-            rows = resp2.json()
-            for row in rows:
-                if row.get('Code') == stock_code:
-                    try:
-                        def _int(v):
-                            return int(str(v).replace(',', '').replace(' ', '') or '0')
-                        net = (_int(row.get('Foreign_Investors_Buy', 0))
-                             - _int(row.get('Foreign_Investors_Sell', 0))) // 1000
-                        today = datetime.now().strftime('%Y-%m-%d')
-                        records = [{'date': today, 'foreign_net': net, 'is_buy': net > 0}]
-                        return {
-                            'source':          'TWSE OpenAPI（僅今日）',
-                            'records':         records,
-                            'consecutive_buy': 1 if net > 0 else 0,
-                            'total_net_5d':    net,
-                            'latest_net':      net,
-                            'bullish':         net > 0,
-                        }
-                    except Exception as e2:
-                        twse_err = f"TWSE row parse error: {e2}"
-                        break
-        twse_err = f"TWSE OpenAPI HTTP {resp2.status_code}"
-    except Exception as e:
-        twse_err = f"TWSE OpenAPI exception: {e}"
+    twse_err = "TWSE OpenAPI 已停用（回傳空值）"
 
     # 兩個來源都失敗，回傳錯誤診斷
-    return {'error': f"{finmind_err} | {twse_err}"}
+    return {'error': finmind_err}
 
 
 # ─────────────────────────────────────────────
