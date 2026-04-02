@@ -236,6 +236,240 @@ def fetch_institutional(ticker):
     return {'error': finmind_err}
 
 
+
+# ─────────────────────────────────────────────
+# 本益比河流圖資料（FinMind TaiwanStockPER）
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def fetch_per_river(ticker, years=5):
+    """
+    從 FinMind 抓歷史 PER + 每季 EPS，計算本益比河流圖帶狀線
+    回傳 dict：
+      per_df   : 每日 PER（DatetimeIndex，PER 欄）
+      band_df  : 每日河流帶（index=日期，欄=各倍數股價）
+      eps_df   : 每季 EPS（DatetimeIndex，EPS 欄）
+      stats    : {'current_per', 'avg', 'std', 'pct_rank', 'zone'}
+    """
+    if not ticker.endswith('.TW'):
+        return None
+    stock_code = ticker.replace('.TW', '')
+    start_date = (datetime.now() - timedelta(days=365 * years)).strftime('%Y-%m-%d')
+
+    try:
+        # ── 每日 PER ──────────────────────────────────────────────────────────
+        url_per = (
+            'https://api.finmindtrade.com/api/v4/data'
+            f'?dataset=TaiwanStockPER&data_id={stock_code}&start_date={start_date}'
+        )
+        r = requests.get(url_per, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        if r.status_code != 200 or r.json().get('status') != 200:
+            return {'error': f'PER API HTTP {r.status_code}'}
+        per_rows = r.json().get('data', [])
+        if not per_rows:
+            return {'error': 'PER 資料空白'}
+
+        per_df = pd.DataFrame(per_rows)
+        per_df['date'] = pd.to_datetime(per_df['date'])
+        per_df = per_df.set_index('date').sort_index()
+        per_df['PER'] = pd.to_numeric(per_df['PER'], errors='coerce')
+        per_df['stock_price'] = pd.to_numeric(per_df['stock_price'], errors='coerce')
+        per_df = per_df[['PER', 'stock_price']].dropna()
+
+        # ── 每季 EPS（用於計算河流帶）────────────────────────────────────────
+        url_eps = (
+            'https://api.finmindtrade.com/api/v4/data'
+            f'?dataset=TaiwanStockFinancialStatements&data_id={stock_code}&start_date={start_date}'
+        )
+        r2 = requests.get(url_eps, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        eps_annual = None
+        if r2.status_code == 200 and r2.json().get('status') == 200:
+            fin_rows = r2.json().get('data', [])
+            if fin_rows:
+                fin_df = pd.DataFrame(fin_rows)
+                # 取 EPS（type == 'EPS'）
+                eps_rows = fin_df[fin_df['type'] == 'EPS'].copy()
+                if not eps_rows.empty:
+                    eps_rows['date'] = pd.to_datetime(eps_rows['date'])
+                    eps_rows['value'] = pd.to_numeric(eps_rows['value'], errors='coerce')
+                    eps_rows = eps_rows.set_index('date').sort_index()
+                    # 用滾動 4 季 EPS 合計（TTM）
+                    eps_annual = eps_rows['value'].resample('QE').sum()
+                    eps_annual = eps_annual.rolling(4).sum()  # TTM EPS
+
+        # ── 計算河流帶 ────────────────────────────────────────────────────────
+        # 方法一：有 TTM EPS → 用固定 PE 倍數
+        # 方法二：沒有 EPS → 從歷史 PER 分位數計算價格帶
+        band_df   = pd.DataFrame(index=per_df.index)
+        multiples = [10, 15, 20, 25, 30]
+        band_colors = ['#2ecc71', '#27ae60', '#f39c12', '#e67e22', '#e74c3c']
+
+        if eps_annual is not None and len(eps_annual.dropna()) >= 2:
+            # 把季度 EPS 前向填充到每日
+            daily_eps = eps_annual.reindex(per_df.index, method='ffill')
+            for m in multiples:
+                band_df[f'{m}x'] = daily_eps * m
+            eps_latest = float(eps_annual.dropna().iloc[-1])
+        else:
+            # 備援：從歷史 PER × 目前股價反推隱含帶狀
+            price_series = per_df['stock_price']
+            implied_eps  = price_series / per_df['PER'].replace(0, np.nan)
+            daily_eps_implied = implied_eps.rolling(60, min_periods=1).median()
+            for m in multiples:
+                band_df[f'{m}x'] = daily_eps_implied * m
+            eps_latest = float(daily_eps_implied.dropna().iloc[-1])
+
+        band_df = band_df.dropna(how='all')
+
+        # ── 統計（估值位置）─────────────────────────────────────────────────
+        valid_per = per_df['PER'].replace(0, np.nan).dropna()
+        cur_per   = float(valid_per.iloc[-1]) if len(valid_per) else np.nan
+        avg_per   = float(valid_per.mean())
+        std_per   = float(valid_per.std())
+        pct_rank  = float((valid_per < cur_per).mean() * 100) if not np.isnan(cur_per) else np.nan
+
+        if np.isnan(cur_per):
+            zone = 'unknown'
+        elif cur_per < avg_per - std_per:
+            zone = 'cheap'       # 歷史低估
+        elif cur_per < avg_per:
+            zone = 'fair_low'    # 合理偏低
+        elif cur_per < avg_per + std_per:
+            zone = 'fair_high'   # 合理偏高
+        else:
+            zone = 'expensive'   # 歷史高估
+
+        return {
+            'per_df':      per_df,
+            'band_df':     band_df,
+            'multiples':   multiples,
+            'band_colors': band_colors,
+            'eps_latest':  eps_latest,
+            'stats': {
+                'current_per': cur_per,
+                'avg':         avg_per,
+                'std':         std_per,
+                'pct_rank':    pct_rank,
+                'zone':        zone,
+            },
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def build_per_chart(per_data, ticker):
+    """建立本益比河流圖（Plotly）"""
+    per_df    = per_data['per_df']
+    band_df   = per_data['band_df']
+    multiples = per_data['multiples']
+    colors    = per_data['band_colors']
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.65, 0.35],
+        subplot_titles=['本益比河流圖（股價 vs PE 倍數帶）', '歷史本益比（PER）']
+    )
+
+    # ── 河流帶（填色）──────────────────────────────────────────────
+    # 由高到低填充，形成視覺分層
+    prev_band = None
+    for m, color in zip(reversed(multiples), reversed(colors)):
+        col = f'{m}x'
+        if col not in band_df.columns:
+            continue
+        y = band_df[col].dropna()
+        if y.empty:
+            continue
+        if prev_band is None:
+            fig.add_trace(go.Scatter(
+                x=y.index, y=y, name=f'PE {m}x',
+                line=dict(color=color, width=1),
+                showlegend=True
+            ), row=1, col=1)
+        else:
+            fig.add_trace(go.Scatter(
+                x=y.index, y=y, name=f'PE {m}x',
+                line=dict(color=color, width=1),
+                fill='tonexty',
+                fillcolor=color.replace(')', ', 0.12)').replace('rgb', 'rgba') if 'rgb' in color
+                         else color + '1e',
+                showlegend=True
+            ), row=1, col=1)
+        prev_band = col
+
+    # 用 hex 轉 rgba 填色
+    def hex_fill(hex_c, alpha=0.13):
+        h = hex_c.lstrip('#')
+        r, g, b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+        return f'rgba({r},{g},{b},{alpha})'
+
+    # 重新畫帶狀填充（由低到高，相鄰兩帶之間填色）
+    fig.data = []   # 清空重畫
+    band_cols = [f'{m}x' for m in multiples if f'{m}x' in band_df.columns]
+    for i, col in enumerate(band_cols):
+        y = band_df[col].dropna()
+        if y.empty:
+            continue
+        if i == 0:
+            fig.add_trace(go.Scatter(
+                x=y.index, y=y, name=f'PE {multiples[i]}x',
+                line=dict(color=colors[i], width=1.5),
+                showlegend=True
+            ), row=1, col=1)
+        else:
+            prev_y = band_df[band_cols[i-1]].dropna()
+            fig.add_trace(go.Scatter(
+                x=y.index, y=y, name=f'PE {multiples[i]}x',
+                line=dict(color=colors[i], width=1.5),
+                fill='tonexty',
+                fillcolor=hex_fill(colors[i]),
+                showlegend=True
+            ), row=1, col=1)
+
+    # 股價線
+    fig.add_trace(go.Scatter(
+        x=per_df.index, y=per_df['stock_price'],
+        name='股價', line=dict(color='white', width=2),
+        hovertemplate='%{x|%Y-%m-%d}<br>股價：%{y:.1f}<extra></extra>'
+    ), row=1, col=1)
+
+    # ── 歷史 PER 線 ────────────────────────────────────────────────
+    valid = per_df['PER'].replace(0, np.nan)
+    avg   = float(valid.mean())
+    std   = float(valid.std())
+
+    fig.add_trace(go.Scatter(
+        x=valid.index, y=valid,
+        name='PER', line=dict(color='#45aaf2', width=1.5),
+        hovertemplate='%{x|%Y-%m-%d}<br>PER：%{y:.1f}x<extra></extra>'
+    ), row=2, col=1)
+
+    # 均值帶
+    for level, color, dash, label in [
+        (avg + std, '#e74c3c', 'dash', f'+1σ ({avg+std:.1f}x)'),
+        (avg,       '#f39c12', 'dot',  f'均值 ({avg:.1f}x)'),
+        (avg - std, '#2ecc71', 'dash', f'-1σ ({avg-std:.1f}x)'),
+    ]:
+        fig.add_hline(y=level, row=2, col=1,
+                      line=dict(color=color, width=1, dash=dash),
+                      annotation_text=label,
+                      annotation_position='right',
+                      annotation_font_size=10)
+
+    fig.update_layout(
+        template='plotly_dark', paper_bgcolor='#0d1117', plot_bgcolor='#0d1117',
+        height=620, hovermode='x unified',
+        xaxis_rangeslider_visible=False,
+        legend=dict(orientation='h', y=1.02, x=0, bgcolor='rgba(0,0,0,0)'),
+        margin=dict(l=60, r=80, t=50, b=40),
+        font=dict(color='#c9d1d9', size=11)
+    )
+    fig.update_yaxes(gridcolor='#21262d')
+    fig.update_xaxes(gridcolor='#21262d')
+    fig.update_yaxes(title_text='股價 (TWD)', row=1, col=1)
+    fig.update_yaxes(title_text='PER (倍)',   row=2, col=1)
+    return fig
+
 # ─────────────────────────────────────────────
 # 計算技術指標
 # ─────────────────────────────────────────────
@@ -763,6 +997,7 @@ if 'last_query' not in st.session_state:
     st.session_state.df          = None
     st.session_state.market_env  = None
     st.session_state.institutional = None
+    st.session_state.per_data = None
 
 query_key = f"{ticker}|{interval_label}|{years}|{rsi_low}|{score_th}"
 
@@ -790,6 +1025,9 @@ if run_clicked:
         st.session_state.market_env    = fetch_market_env(cfg['interval'])
         st.session_state.institutional = fetch_institutional(ticker) if ticker.endswith('.TW') else None
 
+    with st.spinner('📊 抓取本益比歷史資料（FinMind）...'):
+        st.session_state.per_data = fetch_per_river(ticker) if ticker.endswith('.TW') else None
+
 elif st.session_state.df is None:
     st.info("👈 請在左側設定股票代碼與週期，再按「執行分析」開始")
     st.stop()
@@ -804,6 +1042,7 @@ elif st.session_state.last_query != query_key:
 df            = st.session_state.df
 market_env    = st.session_state.market_env
 institutional = st.session_state.institutional
+per_data      = st.session_state.get('per_data')
 
 last = df.iloc[-1]
 trend_ok = bool(last['cond_t1']) or bool(last['cond_t2'])
@@ -811,7 +1050,7 @@ market_ok = market_env is not None and market_env['bullish']
 score_now = int(last['signal_score'])
 
 # ── 指標卡片 ──────────────────────────────────
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 with c1:
     st.metric("收盤價", f"{last['Close']:.1f}",
               f"{last['Close'] - df.iloc[-2]['Close']:+.1f}")
@@ -830,6 +1069,14 @@ with c5:
 with c6:
     st.metric("訊號評分", f"{score_now} / 10",
               "★ 強訊號" if last['signal_strong'] else ("△ 觀察" if last['signal_medium'] else ""))
+with c7:
+    if per_data and 'stats' in per_data:
+        ps = per_data['stats']
+        zone_map = {'cheap':'🟢 低估','fair_low':'🟡 合理偏低','fair_high':'🟡 合理偏高','expensive':'🔴 高估','unknown':'—'}
+        st.metric("本益比 PER", f"{ps['current_per']:.1f}x" if not np.isnan(ps['current_per']) else "—",
+                  zone_map.get(ps['zone'],'—'))
+    else:
+        st.metric("本益比 PER", "—", "")
 
 # ── 圖表 ──────────────────────────────────────
 fig = build_chart(df, cfg, interval_label, rsi_low, use_trend_filter)
@@ -853,6 +1100,44 @@ st.caption(
     f"⏱ 資料更新：{df.index[-1].strftime(cfg['date_fmt'])}  |  "
     f"週期：{interval_label}  |  ⚠️ 僅供技術分析參考"
 )
+
+# ── 本益比河流圖 ───────────────────────────────
+st.markdown("---")
+st.subheader("📊 本益比河流圖（PER River Chart）")
+if per_data and 'stats' in per_data:
+    ps = per_data['stats']
+    zone_label = {'cheap':'🟢 歷史低估區','fair_low':'🟡 合理偏低','fair_high':'🟡 合理偏高','expensive':'🔴 歷史高估區','unknown':'—'}
+    zone_color = {'cheap':'success','fair_low':'info','fair_high':'warning','expensive':'error','unknown':'info'}
+
+    pa, pb, pc, pd_ = st.columns(4)
+    with pa: st.metric("當前 PER",  f"{ps['current_per']:.1f}x" if not np.isnan(ps['current_per']) else "—")
+    with pb: st.metric("歷史均值",  f"{ps['avg']:.1f}x")
+    with pc: st.metric("均值±1σ",   f"{ps['avg']-ps['std']:.1f}x ～ {ps['avg']+ps['std']:.1f}x")
+    with pd_: st.metric("估值位置", f"高於歷史 {ps['pct_rank']:.0f}%" if not np.isnan(ps['pct_rank']) else "—",
+                        zone_label.get(ps['zone'], '—'))
+
+    zone_msgs = {
+        'cheap':     '目前 PER 低於歷史均值 1 個標準差，屬歷史**低估**區間，長線佈局勝率較高。',
+        'fair_low':  '目前 PER 低於歷史均值，屬合理偏低區間，估值具吸引力。',
+        'fair_high': '目前 PER 高於歷史均值但未超過 +1σ，屬合理偏高，需留意獲利成長能否支撐。',
+        'expensive': '目前 PER 超過歷史均值 +1σ，屬歷史**高估**區間，投資人已反映較高成長預期，回調風險上升。',
+        'unknown':   'PER 資料不足，無法判斷估值區間。',
+    }
+    st.info(zone_msgs.get(ps['zone'], ''))
+
+    per_fig = build_per_chart(per_data, ticker)
+    st.plotly_chart(per_fig, width='stretch')
+
+    st.caption(
+        f"河流帶說明：PE 10x / 15x / 20x / 25x / 30x 對應隱含股價帶。"
+        f"股價在低 PE 帶表示估值偏低，在高 PE 帶表示市場給予較高溢價。"
+        f"資料來源：FinMind（TaiwanStockPER）"
+    )
+elif per_data and 'error' in per_data:
+    st.caption(f"PER 河流圖暫時無法載入：{per_data['error']}")
+elif not ticker.endswith('.TW'):
+    st.caption("PER 河流圖僅支援台灣上市股票（代碼需以 .TW 結尾）")
+
 
 # ── 底部分析 ───────────────────────────────────
 dist_pct = abs(last['Close'] - last['Support']) / last['Support'] * 100
