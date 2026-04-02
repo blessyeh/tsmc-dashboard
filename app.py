@@ -147,61 +147,87 @@ def fetch_market_env(interval):
     except:
         return None
 
+def _parse_twse_net(raw: str) -> int:
+    """將 TWSE 回傳數字字串轉整數（處理全形負號、千分位逗號）"""
+    s = raw.replace(',', '').replace('−', '-').replace('－', '-').strip()
+    try:
+        return int(s) if s and s not in ('--', '') else 0
+    except ValueError:
+        return 0
+
+def _recent_trading_days(n: int) -> list:
+    """回傳最近 n 個交易日清單（跳過週六日）格式 YYYYMMDD"""
+    dates, d = [], datetime.now()
+    while len(dates) < n:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:
+            dates.append(d.strftime('%Y%m%d'))
+    return dates
+
 @st.cache_data(ttl=1800)
 def fetch_institutional(ticker):
-    """從 TWSE 抓取外資買賣超（僅限 .TW 股票）"""
+    """
+    從 FinMind 公開 API 抓取外資買賣超（近 30 個交易日）
+    免費無需 Token，支援台灣上市股票
+    API: https://finmindtrade.com/
+    """
     if not ticker.endswith('.TW'):
         return None
     stock_code = ticker.replace('.TW', '')
-    records = []
+    start_date = (datetime.now() - timedelta(days=45)).strftime('%Y-%m-%d')
 
-    for i in range(8):
-        date_str = (datetime.now() - timedelta(days=i+1)).strftime('%Y%m%d')
-        try:
-            url  = f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALLBUT0999"
-            resp = requests.get(url, timeout=6, headers={'User-Agent': 'Mozilla/5.0'})
-            if resp.status_code != 200:
-                continue
-            data = resp.json()
-            if data.get('stat') != 'OK':
-                continue
-            for row in data.get('data', []):
-                if len(row) > 4 and row[0] == stock_code:
-                    try:
-                        net_str = row[4].replace(',', '').replace('－', '-').strip()
-                        if not net_str or net_str == '--':
-                            net_str = '0'
-                        records.append({'date': date_str, 'foreign_net': int(net_str)})
-                    except:
-                        pass
-                    break
-            if len(records) >= 5:
+    try:
+        url = (
+            'https://api.finmindtrade.com/api/v4/data'
+            f'?dataset=TaiwanStockInstitutionalInvestorsBuySell'
+            f'&data_id={stock_code}'
+            f'&start_date={start_date}'
+        )
+        resp = requests.get(url, timeout=15, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        })
+        if resp.status_code != 200:
+            return None
+        payload = resp.json()
+        if payload.get('status') != 200 or not payload.get('data'):
+            return None
+
+        # 每筆為單一法人單日，外資 = 外陸資 + 外資自營商
+        from collections import defaultdict
+        daily = defaultdict(int)
+        for row in payload['data']:
+            name = row.get('name', '')
+            if '外陸資' in name or '外資自營商' in name:
+                # FinMind 單位為「股」，÷1000 換算為「張」
+                net = (int(row.get('buy', 0)) - int(row.get('sell', 0))) // 1000
+                daily[row['date']] += net
+
+        if not daily:
+            return None
+
+        sorted_dates = sorted(daily.keys(), reverse=True)[:10]
+        records = [{'date': d, 'foreign_net': daily[d]} for d in sorted_dates]
+        for r in records:
+            r['is_buy'] = r['foreign_net'] > 0
+
+        consecutive_buy = 0
+        for r in records:
+            if r['is_buy']:
+                consecutive_buy += 1
+            else:
                 break
-        except:
-            pass
 
-    if not records:
+        total_5d = sum(r['foreign_net'] for r in records[:5])
+        return {
+            'records':         records[:10],
+            'consecutive_buy': consecutive_buy,
+            'total_net_5d':    total_5d,
+            'latest_net':      records[0]['foreign_net'],
+            'bullish':         consecutive_buy >= 3 or (consecutive_buy >= 1 and total_5d > 0),
+        }
+    except Exception:
         return None
 
-    records = sorted(records, key=lambda x: x['date'], reverse=True)
-    for r in records:
-        r['is_buy'] = r['foreign_net'] > 0
-
-    consecutive_buy = 0
-    for r in records:
-        if r['is_buy']:
-            consecutive_buy += 1
-        else:
-            break
-
-    total_5d = sum(r['foreign_net'] for r in records[:5])
-    return {
-        'records':          records[:5],
-        'consecutive_buy':  consecutive_buy,
-        'total_net_5d':     total_5d,
-        'latest_net':       records[0]['foreign_net'],
-        'bullish':          consecutive_buy >= 3 or (consecutive_buy >= 1 and total_5d > 0),
-    }
 
 # ─────────────────────────────────────────────
 # 計算技術指標
@@ -656,9 +682,9 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
                 )
                 inst_df['買賣超（張）'] = inst_df['foreign_net'].map(lambda x: f"{x:+,}")
                 inst_df = inst_df[['date','方向','買賣超（張）']].rename(columns={'date':'日期'})
-                st.dataframe(inst_df, use_container_width=True, hide_index=True)
+                st.dataframe(inst_df, width='stretch', hide_index=True)
         else:
-            st.caption("外資資料暫時無法取得（TWSE API 連線問題，部署後可正常使用）")
+            st.caption("外資資料暫時無法取得，請稍後再試（資料來源：FinMind 公開 API）")
 
     # ── 完整明細（可展開）────────────────────────────
     with st.expander("📋 10項評分條件完整明細"):
@@ -713,28 +739,56 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
 
 
 # ─────────────────────────────────────────────
-# 主流程
+# 主流程（手動觸發）
 # ─────────────────────────────────────────────
 period     = cfg['period_map'].get(years, '3y')
 vol_ma_col = f'Vol_MA{cfg["vol_ma"]}'
 
 st.title(f"📈 {ticker}　{interval_label} 技術分析儀表板 v2")
 
-with st.spinner("📡 正在抓取股價資料..."):
-    try:
-        df = fetch_data(ticker, cfg['interval'], period)
-        if df.empty:
-            st.error("無法取得資料，請確認股票代碼是否正確（台股請加 .TW，如 2330.TW）")
-            st.stop()
-        df = calc_indicators(df, cfg)
-        df = detect_signals(df, cfg, rsi_low, score_th)
-    except Exception as e:
-        st.error(f"資料抓取失敗：{e}")
-        st.stop()
+# ── 手動執行按鈕（側邊欄底部已設定，主畫面也放一顆）─────────
+run_clicked = st.button("🔍 執行分析", type="primary", help="設定好參數後點此開始分析")
 
-with st.spinner("📡 抓取大盤環境與外資資料..."):
-    market_env    = fetch_market_env(cfg['interval'])
-    institutional = fetch_institutional(ticker) if ticker.endswith('.TW') else None
+# 用 session_state 記住「已執行過」，切換週期/代碼時需重新按
+if 'last_query' not in st.session_state:
+    st.session_state.last_query = None
+    st.session_state.df          = None
+    st.session_state.market_env  = None
+    st.session_state.institutional = None
+
+query_key = f"{ticker}|{interval_label}|{years}|{rsi_low}|{score_th}"
+
+if run_clicked:
+    st.session_state.last_query = query_key
+    # 清除舊快取，確保抓到最新資料
+    fetch_data.clear()
+    fetch_market_env.clear()
+    fetch_institutional.clear()
+
+    with st.spinner("📡 正在抓取股價資料..."):
+        try:
+            df = fetch_data(ticker, cfg['interval'], period)
+            if df.empty:
+                st.error("無法取得資料，請確認股票代碼（台股加 .TW，如 2330.TW）")
+                st.stop()
+            df = calc_indicators(df, cfg)
+            df = detect_signals(df, cfg, rsi_low, score_th)
+            st.session_state.df = df
+        except Exception as e:
+            st.error(f"資料抓取失敗：{e}")
+            st.stop()
+
+    with st.spinner("📡 抓取大盤環境與外資資料（FinMind）..."):
+        st.session_state.market_env    = fetch_market_env(cfg['interval'])
+        st.session_state.institutional = fetch_institutional(ticker) if ticker.endswith('.TW') else None
+
+elif st.session_state.df is None:
+    st.info("👈 請在左側設定股票代碼與週期，再按「執行分析」開始")
+    st.stop()
+
+df            = st.session_state.df
+market_env    = st.session_state.market_env
+institutional = st.session_state.institutional
 
 last = df.iloc[-1]
 trend_ok = bool(last['cond_t1']) or bool(last['cond_t2'])
@@ -764,7 +818,7 @@ with c6:
 
 # ── 圖表 ──────────────────────────────────────
 fig = build_chart(df, cfg, interval_label, rsi_low, use_trend_filter)
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width='stretch')
 
 # ── 近期訊號表 ─────────────────────────────────
 strong_signals = df[df['signal_strong']].tail(5)
@@ -778,7 +832,7 @@ if not strong_signals.empty:
     st.dataframe(disp.style.format({
         '收盤價':'{:.1f}', 'RSI':'{:.1f}', 'K值':'{:.1f}',
         'D值':'{:.1f}', 'BB%B':'{:.1f}%', '評分(/10)':'{:.0f}'
-    }), use_container_width=True)
+    }), width='stretch')
 
 st.caption(
     f"⏱ 資料更新：{df.index[-1].strftime(cfg['date_fmt'])}  |  "
