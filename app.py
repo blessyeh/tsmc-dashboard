@@ -360,21 +360,24 @@ def fetch_per_river(ticker, years=5):
 
 
 def build_per_chart(per_data, ticker, price_series=None):
-    """建立本益比河流圖（Plotly）
-    price_series：外部日收盤價 pd.Series（index=DatetimeIndex），用於疊加股價線及推算 EPS 帶
-    """
+    """建立本益比河流圖（Plotly）— 完整重寫，移除 fillcolor 格式問題"""
+
+    def hex_to_rgba(hex_c, alpha=0.15):
+        h = hex_c.lstrip('#')
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f'rgba({r},{g},{b},{alpha})'
+
     per_df    = per_data['per_df']
-    band_df   = per_data.get('band_df', pd.DataFrame())
+    band_df   = per_data.get('band_df', pd.DataFrame()).copy()
     multiples = per_data['multiples']
     colors    = per_data['band_colors']
 
-    # 若 band_df 是空的（備援模式），用外部股價反推 implied EPS 重新建帶
+    # 備援：band_df 空的時候用外部股價反推隱含 EPS 建帶
     if band_df.empty and price_series is not None:
-        price_aligned = price_series.reindex(per_df.index, method='ffill')
-        implied_eps   = price_aligned / per_df['PER'].replace(0, np.nan)
-        daily_eps_imp = implied_eps.rolling(60, min_periods=1).median()
+        price_al  = price_series.reindex(per_df.index, method='ffill')
+        imp_eps   = (price_al / per_df['PER'].replace(0, np.nan)).rolling(60, min_periods=1).median()
         for m in multiples:
-            band_df[f'{m}x'] = daily_eps_imp * m
+            band_df[f'{m}x'] = imp_eps * m
         band_df = band_df.dropna(how='all')
 
     fig = make_subplots(
@@ -384,101 +387,80 @@ def build_per_chart(per_data, ticker, price_series=None):
         subplot_titles=['本益比河流圖（股價 vs PE 倍數帶）', '歷史本益比（PER）']
     )
 
-    # ── 河流帶（填色）──────────────────────────────────────────────
-    # 由高到低填充，形成視覺分層
-    prev_band = None
-    for m, color in zip(reversed(multiples), reversed(colors)):
-        col = f'{m}x'
-        if col not in band_df.columns:
-            continue
-        y = band_df[col].dropna()
-        if y.empty:
-            continue
-        if prev_band is None:
-            fig.add_trace(go.Scatter(
-                x=y.index, y=y, name=f'PE {m}x',
-                line=dict(color=color, width=1),
-                showlegend=True
-            ), row=1, col=1)
-        else:
-            fig.add_trace(go.Scatter(
-                x=y.index, y=y, name=f'PE {m}x',
-                line=dict(color=color, width=1),
-                fill='tonexty',
-                fillcolor=color.replace(')', ', 0.12)').replace('rgb', 'rgba') if 'rgb' in color
-                         else color + '1e',
-                showlegend=True
-            ), row=1, col=1)
-        prev_band = col
-
-    # 用 hex 轉 rgba 填色
-    def hex_fill(hex_c, alpha=0.13):
-        h = hex_c.lstrip('#')
-        r, g, b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
-        return f'rgba({r},{g},{b},{alpha})'
-
-    # 重新畫帶狀填充（由低到高，相鄰兩帶之間填色）
-    fig.data = []   # 清空重畫
+    # ── 河流帶：由低倍數到高倍數，相鄰兩帶之間 fill='tonexty' ──────────────
     band_cols = [f'{m}x' for m in multiples if f'{m}x' in band_df.columns]
     for i, col in enumerate(band_cols):
         y = band_df[col].dropna()
         if y.empty:
             continue
+        color = colors[i]
         if i == 0:
+            # 最低帶：無填充，只畫線
             fig.add_trace(go.Scatter(
-                x=y.index, y=y, name=f'PE {multiples[i]}x',
-                line=dict(color=colors[i], width=1.5),
-                showlegend=True
+                x=y.index, y=y,
+                name=f'PE {multiples[i]}x',
+                mode='lines',
+                line=dict(color=color, width=1),
+                showlegend=True,
             ), row=1, col=1)
         else:
-            prev_y = band_df[band_cols[i-1]].dropna()
+            # 與前一帶之間填色
             fig.add_trace(go.Scatter(
-                x=y.index, y=y, name=f'PE {multiples[i]}x',
-                line=dict(color=colors[i], width=1.5),
+                x=y.index, y=y,
+                name=f'PE {multiples[i]}x',
+                mode='lines',
+                line=dict(color=color, width=1),
                 fill='tonexty',
-                fillcolor=hex_fill(colors[i]),
-                showlegend=True
+                fillcolor=hex_to_rgba(color, alpha=0.18),
+                showlegend=True,
             ), row=1, col=1)
 
-    # 股價線（使用外部 yfinance 日收盤價）
+    # ── 股價線 ──────────────────────────────────────────────────────
     if price_series is not None:
         price_plot = price_series.reindex(per_df.index, method='ffill').dropna()
-        fig.add_trace(go.Scatter(
-            x=price_plot.index, y=price_plot,
-            name='股價', line=dict(color='white', width=2),
-            hovertemplate='%{x|%Y-%m-%d}<br>股價：%{y:.1f}<extra></extra>'
-        ), row=1, col=1)
+        if not price_plot.empty:
+            fig.add_trace(go.Scatter(
+                x=price_plot.index, y=price_plot,
+                name='股價',
+                mode='lines',
+                line=dict(color='#ffffff', width=2.5),
+                hovertemplate='%{x|%Y-%m-%d}<br>股價：%{y:.1f}<extra></extra>',
+            ), row=1, col=1)
 
-    # ── 歷史 PER 線 ────────────────────────────────────────────────
-    valid = per_df['PER'].replace(0, np.nan)
+    # ── 歷史 PER ────────────────────────────────────────────────────
+    valid = per_df['PER'].replace(0, np.nan).dropna()
     avg   = float(valid.mean())
     std   = float(valid.std())
 
     fig.add_trace(go.Scatter(
         x=valid.index, y=valid,
-        name='PER', line=dict(color='#45aaf2', width=1.5),
-        hovertemplate='%{x|%Y-%m-%d}<br>PER：%{y:.1f}x<extra></extra>'
+        name='PER',
+        mode='lines',
+        line=dict(color='#45aaf2', width=1.5),
+        hovertemplate='%{x|%Y-%m-%d}<br>PER：%{y:.1f}x<extra></extra>',
     ), row=2, col=1)
 
-    # 均值帶
     for level, color, dash, label in [
-        (avg + std, '#e74c3c', 'dash', f'+1σ ({avg+std:.1f}x)'),
-        (avg,       '#f39c12', 'dot',  f'均值 ({avg:.1f}x)'),
-        (avg - std, '#2ecc71', 'dash', f'-1σ ({avg-std:.1f}x)'),
+        (avg + std, '#e74c3c', 'dash', f'+1σ  {avg+std:.1f}x'),
+        (avg,       '#f39c12', 'dot',  f'均值 {avg:.1f}x'),
+        (avg - std, '#2ecc71', 'dash', f'-1σ  {avg-std:.1f}x'),
     ]:
-        fig.add_hline(y=level, row=2, col=1,
-                      line=dict(color=color, width=1, dash=dash),
-                      annotation_text=label,
-                      annotation_position='right',
-                      annotation_font_size=10)
+        fig.add_hline(
+            y=level, row=2, col=1,
+            line=dict(color=color, width=1, dash=dash),
+            annotation_text=label,
+            annotation_position='right',
+            annotation_font=dict(size=10, color=color),
+        )
 
     fig.update_layout(
-        template='plotly_dark', paper_bgcolor='#0d1117', plot_bgcolor='#0d1117',
+        template='plotly_dark',
+        paper_bgcolor='#0d1117', plot_bgcolor='#0d1117',
         height=620, hovermode='x unified',
         xaxis_rangeslider_visible=False,
         legend=dict(orientation='h', y=1.02, x=0, bgcolor='rgba(0,0,0,0)'),
-        margin=dict(l=60, r=80, t=50, b=40),
-        font=dict(color='#c9d1d9', size=11)
+        margin=dict(l=60, r=100, t=50, b=40),
+        font=dict(color='#c9d1d9', size=11),
     )
     fig.update_yaxes(gridcolor='#21262d')
     fig.update_xaxes(gridcolor='#21262d')
