@@ -411,23 +411,49 @@ def fetch_futures_oi():
             return {'error': '無資料'}
 
         df_f = pd.DataFrame(rows)
-        df_f['date'] = pd.to_datetime(df_f['date'])
 
-        # FinMind 欄位：name / long_open_interest / short_open_interest /
-        #               long_open_interest_balance / short_open_interest_balance
+        # 自動偵測日期欄位名稱（FinMind 不同版本可能不同）
+        date_col = next(
+            (c for c in ['date', 'Date', 'trade_date', 'DataDate'] if c in df_f.columns),
+            None
+        )
+        if date_col is None:
+            return {'error': f'找不到日期欄位，實際欄位：{list(df_f.columns)}'}
+        df_f[date_col] = pd.to_datetime(df_f[date_col])
+
+        # 自動偵測法人名稱欄位
+        name_col = next(
+            (c for c in ['name', 'Name', 'identity_type', 'InstitutionalInvestors']
+             if c in df_f.columns),
+            None
+        )
+        if name_col is None:
+            return {'error': f'找不到法人名稱欄位，實際欄位：{list(df_f.columns)}'}
+
+        # 多口/空口欄位名（FinMind 版本差異）
+        long_col  = next((c for c in ['long_open_interest_balance',  'LongOpenInterestBalance',  'long_balance']  if c in df_f.columns), None)
+        short_col = next((c for c in ['short_open_interest_balance', 'ShortOpenInterestBalance', 'short_balance'] if c in df_f.columns), None)
+        if long_col is None or short_col is None:
+            return {'error': f'找不到多空倉位欄位，實際欄位：{list(df_f.columns)}'}
+
+        # 法人分組（同時支援中文舊版與英文新版名稱）
         GROUP = {
-            '自營商':         '自營商',
-            '投信':           '投信',
-            '外資及大陸地區': '外資',
+            '自營商':             '自營商',
+            'Dealer':             '自營商',
+            '投信':               '投信',
+            'Investment_Trust':   '投信',
+            '外資及大陸地區':     '外資',
+            'Foreign_Investor':   '外資',
+            'Foreign_Dealer_Self':'外資',
         }
         from collections import defaultdict
         daily_net = defaultdict(lambda: defaultdict(int))
         for _, row in df_f.iterrows():
-            grp = GROUP.get(row.get('name', ''))
+            grp = GROUP.get(str(row.get(name_col, '')))
             if grp is None:
                 continue
-            net = int(row.get('long_open_interest_balance', 0) or 0)                 - int(row.get('short_open_interest_balance', 0) or 0)
-            daily_net[row['date']][grp] += net
+            net = int(row.get(long_col, 0) or 0) - int(row.get(short_col, 0) or 0)
+            daily_net[row[date_col]][grp] += net
 
         dates = sorted(daily_net.keys())
         records = []
