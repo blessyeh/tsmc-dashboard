@@ -1460,7 +1460,7 @@ with tab1:
             disp_ti = ti_df.copy()
             disp_ti.index = disp_ti.index.strftime('%Y/%m/%d')
             st.dataframe(
-                disp_ti.sort_index(ascending=False).style.applymap(
+                disp_ti.sort_index(ascending=False).style.map(
                     lambda v: 'color: #ff6b6b' if v < 0 else 'color: #51cf66',
                     subset=['外資','投信','自營商','合計']
                 ).format("{:+,}"),
@@ -1625,7 +1625,7 @@ with tab3:
             disp_fo = fo_df.copy()
             disp_fo.index = disp_fo.index.strftime('%Y/%m/%d')
             st.dataframe(
-                disp_fo.sort_index(ascending=False).style.applymap(
+                disp_fo.sort_index(ascending=False).style.map(
                     lambda v: 'color: #ff6b6b' if v < 0 else 'color: #51cf66',
                     subset=['外資','投信','自營商','合計']
                 ).format("{:+,}"),
