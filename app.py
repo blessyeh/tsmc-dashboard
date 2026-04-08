@@ -237,6 +237,231 @@ def fetch_institutional(ticker):
 
 
 
+
+# ─────────────────────────────────────────────
+# 三大法人 30 天買賣超（FinMind）
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=1800)
+def fetch_three_institutions(ticker):
+    """
+    三大法人近 30 個交易日買賣超
+    dataset: TaiwanStockInstitutionalInvestorsBuySell
+    name 欄位：Foreign_Investor、Investment_Trust、Dealer_self、Dealer_Hedging、Foreign_Dealer_Self
+    """
+    if not ticker.endswith('.TW'):
+        return None
+    stock_code = ticker.replace('.TW', '')
+    start_date = (datetime.now() - timedelta(days=50)).strftime('%Y-%m-%d')
+    try:
+        url = (
+            'https://api.finmindtrade.com/api/v4/data'
+            f'?dataset=TaiwanStockInstitutionalInvestorsBuySell'
+            f'&data_id={stock_code}&start_date={start_date}'
+        )
+        r = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        if r.status_code != 200 or r.json().get('status') != 200:
+            return {'error': f'HTTP {r.status_code}'}
+        rows = r.json().get('data', [])
+        if not rows:
+            return {'error': '無資料'}
+
+        # 法人名稱對應
+        GROUP = {
+            'Foreign_Investor':    '外資',
+            'Foreign_Dealer_Self': '外資',        # 合併入外資
+            'Investment_Trust':    '投信',
+            'Dealer_self':         '自營商',
+            'Dealer_Hedging':      '自營商',       # 合併入自營商
+        }
+        from collections import defaultdict
+        # {date: {法人: net_張}}
+        daily = defaultdict(lambda: defaultdict(int))
+        for row in rows:
+            name   = row.get('name', '')
+            group  = GROUP.get(name)
+            if group is None:
+                continue
+            net = (int(row.get('buy', 0)) - int(row.get('sell', 0))) // 1000
+            daily[row['date']][group] += net
+
+        dates = sorted(daily.keys(), reverse=True)[:30]
+        records = []
+        for d in dates:
+            rec = {'date': d}
+            for g in ['外資', '投信', '自營商']:
+                rec[g] = daily[d].get(g, 0)
+            rec['合計'] = rec['外資'] + rec['投信'] + rec['自營商']
+            records.append(rec)
+
+        df_inst = pd.DataFrame(records).set_index('date')
+        df_inst.index = pd.to_datetime(df_inst.index)
+        df_inst = df_inst.sort_index()
+
+        # 統計摘要（近 10 日）
+        r10 = df_inst.tail(10)
+        summary = {
+            col: {
+                'total':  int(r10[col].sum()),
+                'consec': 0,
+            }
+            for col in ['外資', '投信', '自營商', '合計']
+        }
+        for col in ['外資', '投信', '自營商', '合計']:
+            vals = df_inst[col].iloc[::-1].tolist()   # 最新在前
+            cnt = 0
+            for v in vals:
+                if v > 0: cnt += 1
+                else: break
+            summary[col]['consec'] = cnt
+
+        return {'df': df_inst, 'summary': summary}
+    except Exception as e:
+        return {'error': str(e)}
+
+
+# ─────────────────────────────────────────────
+# 融資融券餘額（FinMind）
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=1800)
+def fetch_margin(ticker):
+    """
+    融資融券近 60 日餘額
+    dataset: TaiwanStockMarginPurchaseShortSale
+    """
+    if not ticker.endswith('.TW'):
+        return None
+    stock_code = ticker.replace('.TW', '')
+    start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+    try:
+        url = (
+            'https://api.finmindtrade.com/api/v4/data'
+            f'?dataset=TaiwanStockMarginPurchaseShortSale'
+            f'&data_id={stock_code}&start_date={start_date}'
+        )
+        r = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        if r.status_code != 200 or r.json().get('status') != 200:
+            return {'error': f'HTTP {r.status_code}'}
+        rows = r.json().get('data', [])
+        if not rows:
+            return {'error': '無資料'}
+
+        df_m = pd.DataFrame(rows)
+        df_m['date'] = pd.to_datetime(df_m['date'])
+        df_m = df_m.set_index('date').sort_index()
+
+        # 欄位：MarginPurchaseBuy, MarginPurchaseSell, MarginPurchaseRedeem,
+        #        MarginPurchaseTodayBalance, ShortSaleBuy, ShortSaleSell,
+        #        ShortSaleTodayBalance 等
+        num_cols = ['MarginPurchaseTodayBalance', 'ShortSaleTodayBalance',
+                    'MarginPurchaseBuy', 'MarginPurchaseSell',
+                    'ShortSaleBuy', 'ShortSaleSell']
+        for c in num_cols:
+            if c in df_m.columns:
+                df_m[c] = pd.to_numeric(df_m[c], errors='coerce')
+
+        df_m = df_m[[c for c in num_cols if c in df_m.columns]].dropna(how='all')
+
+        last = df_m.iloc[-1] if not df_m.empty else pd.Series()
+        prev = df_m.iloc[-2] if len(df_m) >= 2 else pd.Series()
+
+        # 融資餘額趨勢（5日變化）
+        margin_bal  = df_m['MarginPurchaseTodayBalance'] if 'MarginPurchaseTodayBalance' in df_m else pd.Series()
+        short_bal   = df_m['ShortSaleTodayBalance']      if 'ShortSaleTodayBalance'      in df_m else pd.Series()
+        margin_chg  = int(margin_bal.iloc[-1] - margin_bal.iloc[-5]) if len(margin_bal) >= 5 else 0
+        short_chg   = int(short_bal.iloc[-1]  - short_bal.iloc[-5])  if len(short_bal)  >= 5 else 0
+
+        # 融券覆蓋率 = 融券/融資（比值高 → 空方佔優）
+        cover_ratio = (float(short_bal.iloc[-1]) / float(margin_bal.iloc[-1])
+                       if (len(margin_bal) > 0 and float(margin_bal.iloc[-1]) > 0) else 0)
+
+        return {
+            'df':          df_m,
+            'margin_bal':  margin_bal,
+            'short_bal':   short_bal,
+            'margin_chg':  margin_chg,
+            'short_chg':   short_chg,
+            'cover_ratio': cover_ratio,
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+
+# ─────────────────────────────────────────────
+# 台指期貨三大法人未平倉淨額（FinMind）
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=1800)
+def fetch_futures_oi():
+    """
+    台指期貨三大法人未平倉多空淨口數（近 60 日）
+    dataset: TaiwanFuturesInstitutionalInvestors
+    商品：TX（台指期）
+    """
+    start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+    try:
+        url = (
+            'https://api.finmindtrade.com/api/v4/data'
+            f'?dataset=TaiwanFuturesInstitutionalInvestors'
+            f'&data_id=TX&start_date={start_date}'
+        )
+        r = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        if r.status_code != 200 or r.json().get('status') != 200:
+            return {'error': f'HTTP {r.status_code}'}
+        rows = r.json().get('data', [])
+        if not rows:
+            return {'error': '無資料'}
+
+        df_f = pd.DataFrame(rows)
+        df_f['date'] = pd.to_datetime(df_f['date'])
+
+        # FinMind 欄位：name / long_open_interest / short_open_interest /
+        #               long_open_interest_balance / short_open_interest_balance
+        GROUP = {
+            '自營商':         '自營商',
+            '投信':           '投信',
+            '外資及大陸地區': '外資',
+        }
+        from collections import defaultdict
+        daily_net = defaultdict(lambda: defaultdict(int))
+        for _, row in df_f.iterrows():
+            grp = GROUP.get(row.get('name', ''))
+            if grp is None:
+                continue
+            net = int(row.get('long_open_interest_balance', 0) or 0)                 - int(row.get('short_open_interest_balance', 0) or 0)
+            daily_net[row['date']][grp] += net
+
+        dates = sorted(daily_net.keys())
+        records = []
+        for d in dates:
+            rec = {'date': d}
+            for g in ['外資', '投信', '自營商']:
+                rec[g] = daily_net[d].get(g, 0)
+            rec['合計'] = rec['外資'] + rec['投信'] + rec['自營商']
+            records.append(rec)
+
+        df_oi = pd.DataFrame(records).set_index('date').sort_index()
+
+        # 最新一日數值
+        last = df_oi.iloc[-1] if not df_oi.empty else pd.Series()
+        prev = df_oi.iloc[-2] if len(df_oi) >= 2 else pd.Series()
+        chg  = {col: int(last.get(col, 0) - prev.get(col, 0))
+                for col in ['外資', '投信', '自營商', '合計']}
+
+        # 外資淨多口 > 0 → 偏多
+        foreign_net = int(last.get('外資', 0))
+        total_net   = int(last.get('合計', 0))
+        bullish     = foreign_net > 0 and total_net > 0
+
+        return {
+            'df':          df_oi,
+            'last':        last.to_dict(),
+            'chg':         chg,
+            'foreign_net': foreign_net,
+            'total_net':   total_net,
+            'bullish':     bullish,
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
 # ─────────────────────────────────────────────
 # 本益比河流圖資料（FinMind TaiwanStockPER）
 # ─────────────────────────────────────────────
@@ -996,6 +1221,9 @@ if 'last_query' not in st.session_state:
     st.session_state.market_env  = None
     st.session_state.institutional = None
     st.session_state.per_data = None
+    st.session_state.three_inst = None
+    st.session_state.margin    = None
+    st.session_state.futures_oi = None
 
 query_key = f"{ticker}|{interval_label}|{years}|{rsi_low}|{score_th}"
 
@@ -1026,6 +1254,15 @@ if run_clicked:
     with st.spinner('📊 抓取本益比歷史資料（FinMind）...'):
         st.session_state.per_data = fetch_per_river(ticker) if ticker.endswith('.TW') else None
 
+    with st.spinner('📊 抓取三大法人、融資融券、期貨法人資料...'):
+        if ticker.endswith('.TW'):
+            st.session_state.three_inst  = fetch_three_institutions(ticker)
+            st.session_state.margin      = fetch_margin(ticker)
+        else:
+            st.session_state.three_inst  = None
+            st.session_state.margin      = None
+        st.session_state.futures_oi = fetch_futures_oi()
+
 elif st.session_state.df is None:
     st.info("👈 請在左側設定股票代碼與週期，再按「執行分析」開始")
     st.stop()
@@ -1041,6 +1278,9 @@ df            = st.session_state.df
 market_env    = st.session_state.market_env
 institutional = st.session_state.institutional
 per_data      = st.session_state.get('per_data')
+three_inst    = st.session_state.get('three_inst')
+margin_data   = st.session_state.get('margin')
+futures_oi    = st.session_state.get('futures_oi')
 
 last = df.iloc[-1]
 trend_ok = bool(last['cond_t1']) or bool(last['cond_t2'])
@@ -1143,6 +1383,258 @@ elif per_data and 'error' in per_data:
     st.caption(f"PER 河流圖暫時無法載入：{per_data['error']}")
 elif not ticker.endswith('.TW'):
     st.caption("PER 河流圖僅支援台灣上市股票（代碼需以 .TW 結尾）")
+
+
+# ══════════════════════════════════════════════
+# 籌碼面綜合分析（三大法人 / 融資融券 / 期貨法人）
+# ══════════════════════════════════════════════
+st.markdown("---")
+st.subheader("🏦 籌碼面綜合分析")
+
+tab1, tab2, tab3 = st.tabs(["📋 三大法人 30日買賣超", "💳 融資融券餘額", "📉 台指期貨法人未平倉"])
+
+# ── Tab1：三大法人 ──────────────────────────────────────────────────
+with tab1:
+    if three_inst and 'df' in three_inst:
+        ti_df  = three_inst['df']
+        ti_sum = three_inst['summary']
+
+        # 摘要卡片
+        s1, s2, s3, s4 = st.columns(4)
+        for col_w, key, label in [
+            (s1, '外資',  '外資 近10日合計'),
+            (s2, '投信',  '投信 近10日合計'),
+            (s3, '自營商','自營商 近10日合計'),
+            (s4, '合計',  '三大法人合計'),
+        ]:
+            val    = ti_sum[key]['total']
+            consec = ti_sum[key]['consec']
+            delta  = f"連{consec}日買超" if consec >= 2 else ("今日買超" if consec == 1 else "連續賣超")
+            col_w.metric(label, f"{val:+,} 張", delta)
+
+        st.markdown("")
+
+        # 30 日折線圖
+        fig_ti = go.Figure()
+        color_map = {'外資':'#45aaf2', '投信':'#f5a623', '自營商':'#e056fd', '合計':'#00ff88'}
+        for col in ['外資', '投信', '自營商', '合計']:
+            if col in ti_df.columns:
+                fig_ti.add_trace(go.Bar(
+                    x=ti_df.index, y=ti_df[col], name=col,
+                    marker_color=[('#ff4444' if v < 0 else color_map[col]) for v in ti_df[col]],
+                    visible=True if col == '合計' else 'legendonly',
+                ))
+        fig_ti.update_layout(
+            template='plotly_dark', paper_bgcolor='#0d1117', plot_bgcolor='#0d1117',
+            height=320, barmode='group', hovermode='x unified',
+            legend=dict(orientation='h', y=1.02),
+            margin=dict(l=50, r=20, t=30, b=40),
+            yaxis_title='買賣超（張）',
+        )
+        fig_ti.update_xaxes(gridcolor='#21262d')
+        fig_ti.update_yaxes(gridcolor='#21262d', zeroline=True, zerolinecolor='#555')
+        st.plotly_chart(fig_ti, width='stretch')
+
+        # 研判說明
+        foreign_10 = ti_sum['外資']['total']
+        trust_10   = ti_sum['投信']['total']
+        f_consec   = ti_sum['外資']['consec']
+        t_consec   = ti_sum['投信']['consec']
+        total_10   = ti_sum['合計']['total']
+
+        if foreign_10 > 0 and trust_10 > 0:
+            st.success(f"🟢 外資與投信**同步買超**（外資近10日 {foreign_10:+,}張，投信 {trust_10:+,}張），"
+                       f"籌碼面多頭訊號強烈，尤其外資連 {f_consec} 日買超，可信度較高。")
+        elif foreign_10 > 0 and trust_10 <= 0:
+            st.info(f"🟡 外資買超（{foreign_10:+,}張）但投信賣超（{trust_10:+,}張），"
+                    f"法人看法分歧，建議觀察外資是否持續。")
+        elif foreign_10 <= 0 and trust_10 > 0:
+            st.info(f"🟡 投信買超（{trust_10:+,}張）但外資賣超（{foreign_10:+,}張），"
+                    f"投信資金規模較小，整體籌碼仍偏弱。")
+        else:
+            st.warning(f"🔴 外資（{foreign_10:+,}張）與投信（{trust_10:+,}張）**同步賣超**，"
+                       f"法人持續出脫，籌碼面偏空。")
+
+        # 明細表（最近10日）
+        with st.expander("📋 近30日明細"):
+            disp_ti = ti_df.copy()
+            disp_ti.index = disp_ti.index.strftime('%Y/%m/%d')
+            st.dataframe(
+                disp_ti.sort_index(ascending=False).style.applymap(
+                    lambda v: 'color: #ff6b6b' if v < 0 else 'color: #51cf66',
+                    subset=['外資','投信','自營商','合計']
+                ).format("{:+,}"),
+                width='stretch'
+            )
+    elif three_inst and 'error' in three_inst:
+        st.caption(f"三大法人資料無法取得：{three_inst['error']}")
+    else:
+        st.caption("三大法人資料僅支援台股（代碼需以 .TW 結尾）")
+
+# ── Tab2：融資融券 ──────────────────────────────────────────────────
+with tab2:
+    if margin_data and 'df' in margin_data:
+        mg_df  = margin_data['df']
+        mb     = margin_data['margin_bal']
+        sb     = margin_data['short_bal']
+        mg_chg = margin_data['margin_chg']
+        sg_chg = margin_data['short_chg']
+        cover  = margin_data['cover_ratio']
+
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            val = int(mb.iloc[-1]) if not mb.empty else 0
+            st.metric("融資餘額（張）", f"{val:,}", f"近5日 {mg_chg:+,}")
+        with m2:
+            val = int(sb.iloc[-1]) if not sb.empty else 0
+            st.metric("融券餘額（張）", f"{val:,}", f"近5日 {sg_chg:+,}")
+        with m3:
+            st.metric("融券/融資 覆蓋率", f"{cover*100:.1f}%",
+                      "空方佔優" if cover > 0.3 else "多方佔優")
+        with m4:
+            # 融資增 + 股價漲 → 正常多頭；融資減 + 股價漲 → 籌碼乾淨
+            if mg_chg < 0:
+                st.metric("籌碼狀態", "🟢 融資減少", "籌碼趨於乾淨")
+            elif mg_chg > 0:
+                st.metric("籌碼狀態", "🟡 融資增加", "留意追高風險")
+            else:
+                st.metric("籌碼狀態", "⚪ 持平", "")
+
+        # 雙軸圖：融資餘額 + 融券餘額
+        fig_mg = make_subplots(specs=[[{"secondary_y": True}]])
+        if not mb.empty:
+            fig_mg.add_trace(go.Scatter(
+                x=mb.index, y=mb, name='融資餘額',
+                line=dict(color='#ff6b6b', width=2),
+                fill='tozeroy', fillcolor='rgba(255,107,107,0.08)',
+            ), secondary_y=False)
+        if not sb.empty:
+            fig_mg.add_trace(go.Bar(
+                x=sb.index, y=sb, name='融券餘額',
+                marker_color='rgba(69,170,242,0.55)',
+            ), secondary_y=True)
+
+        fig_mg.update_layout(
+            template='plotly_dark', paper_bgcolor='#0d1117', plot_bgcolor='#0d1117',
+            height=320, hovermode='x unified',
+            legend=dict(orientation='h', y=1.02),
+            margin=dict(l=60, r=60, t=30, b=40),
+        )
+        fig_mg.update_yaxes(title_text='融資餘額（張）', gridcolor='#21262d', secondary_y=False)
+        fig_mg.update_yaxes(title_text='融券餘額（張）', gridcolor='#21262d', secondary_y=True)
+        fig_mg.update_xaxes(gridcolor='#21262d')
+        st.plotly_chart(fig_mg, width='stretch')
+
+        # 研判說明
+        if mg_chg < 0 and sg_chg <= 0:
+            st.success("🟢 融資減少且融券未明顯增加，籌碼逐漸乾淨，若股價同步止跌，"
+                       "為**吸籌訊號**，低點可信度提升。")
+        elif mg_chg < 0 and sg_chg > 0:
+            st.warning("⚠️ 融資減少同時融券增加（軋空佈局），市場分歧加大，"
+                       "需觀察誰先認輸。若股價上漲，融券回補可能帶來短線急漲。")
+        elif mg_chg > 0 and sg_chg > 0:
+            st.info("🟡 融資與融券同步增加，多空雙方皆在加碼，方向待確認，"
+                    "避免追高或追空。")
+        elif mg_chg > 0 and sg_chg <= 0:
+            st.info("🟡 融資增加，散戶追多積極，需留意過度槓桿風險。"
+                    "若外資同步買超則訊號較可信，否則需謹慎。")
+
+        st.caption(f"融券覆蓋率（{cover*100:.1f}%）：融券張數 ÷ 融資張數。"
+                   "超過 30% 代表空頭部位相對重，軋空行情機率上升。")
+
+    elif margin_data and 'error' in margin_data:
+        st.caption(f"融資融券資料無法取得：{margin_data['error']}")
+    else:
+        st.caption("融資融券資料僅支援台股（代碼需以 .TW 結尾）")
+
+# ── Tab3：台指期貨法人未平倉 ────────────────────────────────────────
+with tab3:
+    if futures_oi and 'df' in futures_oi:
+        fo_df      = futures_oi['df']
+        fo_last    = futures_oi['last']
+        fo_chg     = futures_oi['chg']
+        fo_foreign = futures_oi['foreign_net']
+        fo_total   = futures_oi['total_net']
+
+        f1, f2, f3, f4 = st.columns(4)
+        for col_w, key, label in [
+            (f1, '外資',  '外資 未平倉淨口'),
+            (f2, '投信',  '投信 未平倉淨口'),
+            (f3, '自營商','自營商 未平倉淨口'),
+            (f4, '合計',  '三大法人合計'),
+        ]:
+            val = int(fo_last.get(key, 0))
+            chg = fo_chg.get(key, 0)
+            col_w.metric(label, f"{val:+,} 口",
+                         f"增 {chg:+,} 口" if chg != 0 else "持平")
+
+        # 折線圖
+        fig_fo = go.Figure()
+        color_map2 = {'外資':'#45aaf2', '投信':'#f5a623', '自營商':'#e056fd', '合計':'#00ff88'}
+        for col in ['外資', '投信', '自營商', '合計']:
+            if col in fo_df.columns:
+                fig_fo.add_trace(go.Scatter(
+                    x=fo_df.index, y=fo_df[col], name=col,
+                    line=dict(color=color_map2[col], width=2),
+                    mode='lines',
+                    visible=True if col in ['外資', '合計'] else 'legendonly',
+                ))
+        fig_fo.add_hline(y=0, line=dict(color='#555', width=1))
+        fig_fo.update_layout(
+            template='plotly_dark', paper_bgcolor='#0d1117', plot_bgcolor='#0d1117',
+            height=320, hovermode='x unified',
+            legend=dict(orientation='h', y=1.02),
+            margin=dict(l=50, r=20, t=30, b=40),
+            yaxis_title='未平倉淨口數（口）',
+        )
+        fig_fo.update_xaxes(gridcolor='#21262d')
+        fig_fo.update_yaxes(gridcolor='#21262d', zeroline=True, zerolinecolor='#555')
+        st.plotly_chart(fig_fo, width='stretch')
+
+        # 研判說明
+        if fo_foreign > 0 and fo_total > 0:
+            st.success(
+                f"🟢 外資台指期**淨多** {fo_foreign:+,} 口（近日變化 {fo_chg['外資']:+,} 口），"
+                f"三大法人合計淨多 {fo_total:+,} 口。外資通常是方向性最強的法人，"
+                f"多口佈局代表對後市看多。"
+            )
+        elif fo_foreign < 0 and fo_total < 0:
+            st.error(
+                f"🔴 外資台指期**淨空** {fo_foreign:+,} 口（近日變化 {fo_chg['外資']:+,} 口），"
+                f"三大法人合計淨空 {fo_total:+,} 口。法人整體偏空，"
+                f"搭配現貨訊號需更謹慎。"
+            )
+        elif fo_foreign > 0 and fo_total < 0:
+            st.info(
+                f"🟡 外資淨多 {fo_foreign:+,} 口，但自營商或投信拉低合計至 {fo_total:+,} 口。"
+                f"法人看法分歧，以外資方向為主要參考。"
+            )
+        else:
+            st.info(
+                f"🟡 外資淨空 {fo_foreign:+,} 口，但整體法人合計 {fo_total:+,} 口。"
+                f"請搭配現貨外資動向綜合判斷。"
+            )
+
+        st.caption(
+            "淨口數 = 多頭未平倉 - 空頭未平倉。正值代表法人看多台指，"
+            "負值代表看空。外資期貨部位與現貨同向時，訊號可信度最高。"
+            "資料來源：FinMind（TaiwanFuturesInstitutionalInvestors，商品代碼 TX）"
+        )
+
+        with st.expander("📋 近60日明細"):
+            disp_fo = fo_df.copy()
+            disp_fo.index = disp_fo.index.strftime('%Y/%m/%d')
+            st.dataframe(
+                disp_fo.sort_index(ascending=False).style.applymap(
+                    lambda v: 'color: #ff6b6b' if v < 0 else 'color: #51cf66',
+                    subset=['外資','投信','自營商','合計']
+                ).format("{:+,}"),
+                width='stretch'
+            )
+    elif futures_oi and 'error' in futures_oi:
+        st.caption(f"期貨法人資料無法取得：{futures_oi['error']}")
+    else:
+        st.caption("資料載入中，請稍後...")
 
 
 # ── 底部分析 ───────────────────────────────────
