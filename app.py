@@ -243,16 +243,13 @@ def fetch_institutional(ticker):
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def fetch_three_institutions():
-    """
-    大盤三大法人買賣超 — goodinfo.tw 加權指數
-    URL: https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=加權指數&CHT_CAT=DAT
-    """
-    url = 'https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=DAT'
+    """大盤三大法人買賣超 — goodinfo.tw 加權指數 (flavor=bs4, 不需 lxml)"""
+    url = ('https://goodinfo.tw/tw/ShowBuySaleChart.asp'
+           '?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=DAT')
     headers = {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer':         'https://goodinfo.tw/tw/index.asp',
         'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
-        'Accept':          'text/html,application/xhtml+xml,*/*;q=0.8',
     }
     try:
         sess = requests.Session()
@@ -262,7 +259,7 @@ def fetch_three_institutions():
             return {'error': f'goodinfo HTTP {r.status_code}'}
         r.encoding = 'utf-8'
 
-        tables = pd.read_html(r.text)          # 不指定 flavor，自動用 html.parser
+        tables = pd.read_html(r.text, flavor='bs4')   # bs4+html.parser, 不需 lxml
         target = None
         for t in tables:
             flat = t.to_string()
@@ -270,31 +267,29 @@ def fetch_three_institutions():
                 target = t
                 break
         if target is None:
-            return {'error': f'goodinfo 找不到三大法人表格（共 {len(tables)} 張表）'}
+            return {'error': f'goodinfo 找不到三大法人表格（共 {len(tables)} 張）'}
 
         df = target.copy()
-        # 展平多層欄位
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [' '.join(str(c) for c in col).strip() for col in df.columns]
         df.columns = [str(c).strip() for c in df.columns]
 
-        def find_col(cols, *keywords):
-            # 優先找同時含所有關鍵字的欄，再退而求其次
+        def _find(cols, *kws):
             for c in cols:
-                if all(k in c for k in keywords): return c
+                if all(k in c for k in kws): return c
             for c in cols:
-                if keywords[0] in c: return c
+                if kws[0] in c: return c
             return None
 
-        date_col    = find_col(df.columns, '日期') or df.columns[0]
-        foreign_col = find_col(df.columns, '外資', '淨') or find_col(df.columns, '外資')
-        trust_col   = find_col(df.columns, '投信', '淨') or find_col(df.columns, '投信')
-        dealer_col  = find_col(df.columns, '自營', '淨') or find_col(df.columns, '自營')
+        date_col    = _find(df.columns, '日期') or df.columns[0]
+        foreign_col = _find(df.columns, '外資', '淨') or _find(df.columns, '外資')
+        trust_col   = _find(df.columns, '投信', '淨') or _find(df.columns, '投信')
+        dealer_col  = _find(df.columns, '自營', '淨') or _find(df.columns, '自營')
 
         if not all([foreign_col, trust_col, dealer_col]):
-            return {'error': f'goodinfo 欄位識別失敗，實際欄位：{list(df.columns)}'}
+            return {'error': f'欄位識別失敗，實際欄位：{list(df.columns)}'}
 
-        def _num(s):
+        def _n(s):
             try: return float(str(s).replace(',','').replace('--','0').strip() or 0)
             except: return 0.0
 
@@ -302,9 +297,9 @@ def fetch_three_institutions():
         df = df.dropna(subset=[date_col]).set_index(date_col).sort_index()
 
         df_inst = pd.DataFrame({
-            '外資':   df[foreign_col].apply(_num),
-            '投信':   df[trust_col].apply(_num),
-            '自營商': df[dealer_col].apply(_num),
+            '外資':   df[foreign_col].apply(_n),
+            '投信':   df[trust_col].apply(_n),
+            '自營商': df[dealer_col].apply(_n),
         }).tail(30)
         df_inst['合計'] = df_inst['外資'] + df_inst['投信'] + df_inst['自營商']
 
@@ -312,15 +307,12 @@ def fetch_three_institutions():
         summary = {}
         for col in ['外資', '投信', '自營商', '合計']:
             vals = df_inst[col].iloc[::-1].tolist()
-            cnt = 0
-            for v in vals:
-                if v > 0: cnt += 1
-                else: break
+            cnt = sum(1 for _ in __import__('itertools').takewhile(lambda v: v > 0, vals))
             summary[col] = {'total': round(r10[col].sum(), 1), 'consec': cnt}
 
         return {'df': df_inst, 'summary': summary, 'source': 'goodinfo'}
     except Exception as e:
-        return {'error': f'goodinfo 三大法人失敗：{e}'}
+        return {'error': f'goodinfo 三大法人：{e}'}
 
 
 # ─────────────────────────────────────────────
@@ -328,19 +320,13 @@ def fetch_three_institutions():
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def fetch_margin():
-    """
-    大盤整體融資融券 — goodinfo.tw 加權指數融資融券頁
-    URL: https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=加權指數&CHT_CAT=MARGIN
-    融資餘額 / 融券餘額（億元或張，依 goodinfo 顯示單位）
-    """
+    """大盤融資融券 — goodinfo.tw 加權指數 (flavor=bs4, 不需 lxml)"""
     headers = {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer':         'https://goodinfo.tw/tw/index.asp',
         'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
-        'Accept':          'text/html,application/xhtml+xml,*/*;q=0.8',
     }
-    # goodinfo 融資融券可能的 CHT_CAT 參數，逐一嘗試
-    candidates = [
+    urls = [
         'https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=MARGIN',
         'https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=MARGIN_DAILY',
         'https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8',
@@ -349,12 +335,17 @@ def fetch_margin():
         sess = requests.Session()
         sess.get('https://goodinfo.tw/tw/index.asp', timeout=10, headers=headers)
 
-        for url in candidates:
+        all_cols = []
+        for url in urls:
             r = sess.get(url, timeout=15, headers=headers)
             if r.status_code != 200:
                 continue
             r.encoding = 'utf-8'
-            tables = pd.read_html(r.text)       # 不指定 flavor
+            try:
+                tables = pd.read_html(r.text, flavor='bs4')   # bs4, 不需 lxml
+            except Exception:
+                continue
+
             for t in tables:
                 flat = t.to_string()
                 if ('融資' in flat or '信用' in flat) and len(t) >= 5:
@@ -363,26 +354,26 @@ def fetch_margin():
                         df_raw.columns = [' '.join(str(c) for c in col).strip()
                                           for col in df_raw.columns]
                     df_raw.columns = [str(c).strip() for c in df_raw.columns]
+                    all_cols.append(list(df_raw.columns))
 
-                    date_col = df_raw.columns[0]
                     mb_col = next((c for c in df_raw.columns
                                    if '融資' in c and ('餘額' in c or '餘' in c)), None)
                     sb_col = next((c for c in df_raw.columns
                                    if '融券' in c and ('餘額' in c or '餘' in c)), None)
-
                     if not mb_col or not sb_col:
-                        # 回報實際欄位供 debug
                         continue
 
-                    def _num(s):
+                    def _n(s):
                         try: return float(str(s).replace(',','').replace('--','0').strip() or 0)
                         except: return 0.0
 
-                    df_raw[date_col] = pd.to_datetime(df_raw[date_col], errors='coerce')
-                    df_raw = df_raw.dropna(subset=[date_col]).set_index(date_col).sort_index()
+                    df_raw[df_raw.columns[0]] = pd.to_datetime(
+                        df_raw[df_raw.columns[0]], errors='coerce')
+                    df_raw = df_raw.dropna(subset=[df_raw.columns[0]])
+                    df_raw = df_raw.set_index(df_raw.columns[0]).sort_index()
 
-                    mb = df_raw[mb_col].apply(_num)
-                    sb = df_raw[sb_col].apply(_num)
+                    mb = df_raw[mb_col].apply(_n)
+                    sb = df_raw[sb_col].apply(_n)
                     mb = mb[mb > 0].tail(60)
                     sb = sb.reindex(mb.index).fillna(0)
 
@@ -391,9 +382,8 @@ def fetch_margin():
                     mb_max = float(mb.max()) if len(mb) > 0 else 1
                     heat   = float(mb.iloc[-1]) / mb_max if mb_max > 0 else 0
 
-                    df_m = pd.DataFrame({'margin_bal': mb, 'short_bal': sb})
                     return {
-                        'df':          df_m,
+                        'df':          pd.DataFrame({'margin_bal': mb, 'short_bal': sb}),
                         'margin_bal':  mb,
                         'short_bal':   sb,
                         'margin_chg':  margin_chg,
@@ -402,14 +392,9 @@ def fetch_margin():
                         'source':      'goodinfo',
                     }
 
-        # 若所有 URL 都找不到合適表格，回報實際情況
-        r_last = sess.get(candidates[0], timeout=15, headers=headers)
-        r_last.encoding = 'utf-8'
-        tbls = pd.read_html(r_last.text) if r_last.status_code == 200 else []
-        col_info = [list(t.columns) for t in tbls[:5]]
-        return {'error': f'goodinfo 融資融券：找不到融資/融券餘額欄位，前5張表欄位：{col_info}'}
+        return {'error': f'goodinfo 找不到融資/融券欄位，抓到的欄位：{all_cols[:3]}'}
     except Exception as e:
-        return {'error': f'goodinfo 融資融券失敗：{e}'}
+        return {'error': f'goodinfo 融資融券：{e}'}
 
 
 # ─────────────────────────────────────────────
@@ -1312,14 +1297,10 @@ if run_clicked:
     with st.spinner('📊 抓取本益比歷史資料（FinMind）...'):
         st.session_state.per_data = fetch_per_river(ticker) if ticker.endswith('.TW') else None
 
-    with st.spinner('📊 抓取三大法人、融資融券、期貨法人資料...'):
-        if ticker.endswith('.TW'):
-            st.session_state.three_inst  = fetch_three_institutions()
-            st.session_state.margin      = fetch_margin()
-        else:
-            st.session_state.three_inst  = None
-            st.session_state.margin      = None
-        st.session_state.futures_oi = fetch_futures_oi()
+    with st.spinner('📊 抓取大盤三大法人、融資融券、期貨法人資料...'):
+        st.session_state.three_inst  = fetch_three_institutions()
+        st.session_state.margin      = fetch_margin()
+        st.session_state.futures_oi  = fetch_futures_oi()
 
 elif st.session_state.df is None:
     st.info("👈 請在左側設定股票代碼與週期，再按「執行分析」開始")
@@ -1449,7 +1430,7 @@ elif not ticker.endswith('.TW'):
 st.markdown("---")
 st.subheader("🏦 籌碼面綜合分析")
 
-tab1, tab2, tab3 = st.tabs(["📋 三大法人 30日買賣超", "💳 融資融券餘額", "📉 台指期貨法人未平倉"])
+tab1, tab2, tab3 = st.tabs(["📋 大盤三大法人買賣超", "💳 大盤整體融資融券", "📉 台指期貨法人未平倉"])
 
 # ── Tab1：三大法人 ──────────────────────────────────────────────────
 with tab1:
@@ -1526,8 +1507,6 @@ with tab1:
             )
     elif three_inst and 'error' in three_inst:
         st.caption(f"三大法人資料無法取得：{three_inst['error']}")
-    else:
-        st.caption("三大法人資料僅支援台股（代碼需以 .TW 結尾）")
 
 # ── Tab2：融資融券 ──────────────────────────────────────────────────
 with tab2:
@@ -1602,8 +1581,6 @@ with tab2:
 
     elif margin_data and 'error' in margin_data:
         st.caption(f"融資融券資料無法取得：{margin_data['error']}")
-    else:
-        st.caption("融資融券資料僅支援台股（代碼需以 .TW 結尾）")
 
 # ── Tab3：台指期貨法人未平倉 ────────────────────────────────────────
 with tab3:
