@@ -164,18 +164,6 @@ def _recent_trading_days(n: int) -> list:
             dates.append(d.strftime('%Y%m%d'))
     return dates
 
-def _twse_roc_to_date(s: str) -> pd.Timestamp:
-    """民國日期字串 '114/04/09' → pd.Timestamp"""
-    parts = s.strip().split('/')
-    return pd.Timestamp(f"{int(parts[0]) + 1911}-{parts[1]}-{parts[2]}")
-
-def _twse_num(s) -> int:
-    """TWSE 數字字串（含逗號）→ int"""
-    try:
-        return int(str(s).replace(',', '').strip() or 0)
-    except ValueError:
-        return 0
-
 @st.cache_data(ttl=1800)
 def fetch_institutional(ticker):
     """
@@ -251,128 +239,150 @@ def fetch_institutional(ticker):
 
 
 # ─────────────────────────────────────────────
-# 大盤整體三大法人買賣超（TWSE T86）
+# 三大法人 30 天買賣超（FinMind）
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def fetch_three_institutions():
     """
-    大盤整體三大法人買賣超（近 60 個交易日）
-    來源：TWSE OpenAPI T86
-    外資 = 外資及陸資買賣超 + 外資自營商買賣超
-    自營商 = 自行買賣 + 避險合計
-    單位：千股（= 張）
+    大盤整體三大法人買賣超（FinMind 全市場加總，近 30 交易日）
+    dataset: TaiwanStockInstitutionalInvestorsBuySell（不帶 data_id = 全市場）
+    name 欄位：Foreign_Investor、Foreign_Dealer_Self、Investment_Trust、
+               Dealer_self、Dealer_Hedging
+    單位：張（原始股數 // 1000）
     """
-    records = {}
-    now = datetime.now()
-    for m in range(3):          # 本月 + 前兩個月
-        d = (now.replace(day=1) - timedelta(days=30 * m))
-        date_str = d.strftime('%Y%m01')
-        try:
-            url = (f'https://www.twse.com.tw/rwd/zh/fund/T86'
-                   f'?response=json&date={date_str}')
-            r = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
-            payload = r.json()
-            if payload.get('stat') != 'OK':
+    start_date = (datetime.now() - timedelta(days=50)).strftime('%Y-%m-%d')
+    try:
+        url = (
+            'https://api.finmindtrade.com/api/v4/data'
+            f'?dataset=TaiwanStockInstitutionalInvestorsBuySell'
+            f'&start_date={start_date}'
+        )
+        r = requests.get(url, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
+        if r.status_code != 200:
+            return {'error': f'FinMind HTTP {r.status_code}'}
+        payload = r.json()
+        if payload.get('status') != 200:
+            return {'error': f"FinMind status={payload.get('status')} {payload.get('msg','')}"}
+        rows = payload.get('data', [])
+        if not rows:
+            return {'error': 'FinMind 無資料'}
+
+        GROUP = {
+            'Foreign_Investor':    '外資',
+            'Foreign_Dealer_Self': '外資',
+            'Investment_Trust':    '投信',
+            'Dealer_self':         '自營商',
+            'Dealer_Hedging':      '自營商',
+        }
+        from collections import defaultdict
+        daily = defaultdict(lambda: defaultdict(int))
+        for row in rows:
+            grp = GROUP.get(row.get('name', ''))
+            if grp is None:
                 continue
-            for row in payload.get('data', []):
-                try:
-                    dt = _twse_roc_to_date(row[0])
-                    # T86 欄位索引（每3欄一組：買進/賣出/買賣超）
-                    # [0]=日期 [1-3]=外資及陸資 [4-6]=外資自營商
-                    # [7-9]=投信 [10-12]=自營商(自行) [13-15]=自營商(避險)
-                    # [16-18]=合計
-                    foreign = _twse_num(row[3]) + _twse_num(row[6])   # 外資合計
-                    trust   = _twse_num(row[9])                        # 投信
-                    dealer  = _twse_num(row[12]) + _twse_num(row[15]) # 自營商合計
-                    total   = _twse_num(row[18])                       # 三大合計
-                    records[dt] = {'外資': foreign, '投信': trust,
-                                   '自營商': dealer, '合計': total}
-                except (IndexError, ValueError):
-                    continue
-        except Exception:
-            continue
+            net = (int(row.get('buy', 0)) - int(row.get('sell', 0))) // 1000
+            daily[row['date']][grp] += net
 
-    if not records:
-        return {'error': 'TWSE T86 無法取得資料'}
+        dates = sorted(daily.keys(), reverse=True)[:30]
+        records = []
+        for d in dates:
+            rec = {'date': d}
+            for g in ['外資', '投信', '自營商']:
+                rec[g] = daily[d].get(g, 0)
+            rec['合計'] = rec['外資'] + rec['投信'] + rec['自營商']
+            records.append(rec)
 
-    df_inst = pd.DataFrame.from_dict(records, orient='index')
-    df_inst.index = pd.DatetimeIndex(df_inst.index)
-    df_inst = df_inst.sort_index().tail(60)
+        df_inst = pd.DataFrame(records).set_index('date')
+        df_inst.index = pd.to_datetime(df_inst.index)
+        df_inst = df_inst.sort_index()
 
-    r10 = df_inst.tail(10)
-    summary = {}
-    for col in ['外資', '投信', '自營商', '合計']:
-        vals = df_inst[col].iloc[::-1].tolist()
-        cnt = 0
-        for v in vals:
-            if v > 0: cnt += 1
-            else: break
-        summary[col] = {'total': int(r10[col].sum()), 'consec': cnt}
+        r10 = df_inst.tail(10)
+        summary = {}
+        for col in ['外資', '投信', '自營商', '合計']:
+            vals = df_inst[col].iloc[::-1].tolist()
+            cnt = 0
+            for v in vals:
+                if v > 0: cnt += 1
+                else: break
+            summary[col] = {'total': int(r10[col].sum()), 'consec': cnt}
 
-    return {'df': df_inst, 'summary': summary}
+        return {'df': df_inst, 'summary': summary}
+    except Exception as e:
+        return {'error': str(e)}
 
-# 大盤整體融資融券餘額（TWSE MI_MARGN）
+
+# ─────────────────────────────────────────────
+# 大盤整體融資融券餘額（FinMind 全市場加總）
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def fetch_margin():
     """
-    大盤整體融資融券餘額（近 3 個月）
-    來源：TWSE MI_MARGN?selectType=MS（整體市場）
-    融資餘額單位：億元；融券餘額單位：千張
+    大盤整體融資融券餘額（近 60 個交易日加總）
+    dataset: TaiwanStockMarginPurchaseShortSale（不帶 data_id = 全市場）
+    MarginPurchaseTodayBalance：融資餘額（張）
+    ShortSaleTodayBalance：     融券餘額（張）
     """
-    records = {}
-    now = datetime.now()
-    for m in range(3):
-        d = (now.replace(day=1) - timedelta(days=30 * m))
-        date_str = d.strftime('%Y%m01')
-        try:
-            url = (f'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN'
-                   f'?response=json&date={date_str}&selectType=MS')
-            r = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
-            payload = r.json()
-            if payload.get('stat') != 'OK':
+    start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+    try:
+        url = (
+            'https://api.finmindtrade.com/api/v4/data'
+            f'?dataset=TaiwanStockMarginPurchaseShortSale'
+            f'&start_date={start_date}'
+        )
+        r = requests.get(url, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
+        if r.status_code != 200:
+            return {'error': f'FinMind HTTP {r.status_code}'}
+        payload = r.json()
+        if payload.get('status') != 200:
+            return {'error': f"FinMind status={payload.get('status')} {payload.get('msg','')}"}
+        rows = payload.get('data', [])
+        if not rows:
+            return {'error': 'FinMind 無資料'}
+
+        from collections import defaultdict
+        daily_m = defaultdict(int)
+        daily_s = defaultdict(int)
+        for row in rows:
+            d = row.get('date', '')
+            try:
+                daily_m[d] += int(row.get('MarginPurchaseTodayBalance', 0) or 0)
+                daily_s[d] += int(row.get('ShortSaleTodayBalance',      0) or 0)
+            except (ValueError, TypeError):
                 continue
-            fields = payload.get('fields', [])
-            # 動態尋找欄位索引
-            mb_idx = next((i for i, f in enumerate(fields)
-                           if '融資' in f and '餘額' in f), 4)
-            sb_idx = next((i for i, f in enumerate(fields)
-                           if '融券' in f and '餘額' in f), 9)
-            for row in payload.get('data', []):
-                try:
-                    dt = _twse_roc_to_date(row[0])
-                    records[dt] = {
-                        'margin_bal': _twse_num(row[mb_idx]),   # 億元
-                        'short_bal':  _twse_num(row[sb_idx]),   # 千張
-                    }
-                except (IndexError, ValueError):
-                    continue
-        except Exception:
-            continue
 
-    if not records:
-        return {'error': 'TWSE MI_MARGN 無法取得資料'}
+        dates = sorted(daily_m.keys())[-60:]
+        if not dates:
+            return {'error': '加總後無資料'}
 
-    df_m = pd.DataFrame.from_dict(records, orient='index')
-    df_m.index = pd.DatetimeIndex(df_m.index)
-    df_m = df_m.sort_index()
-    mb = df_m['margin_bal']
-    sb = df_m['short_bal']
-    margin_chg = int(mb.iloc[-1] - mb.iloc[-5]) if len(mb) >= 5 else 0
-    short_chg  = int(sb.iloc[-1] - sb.iloc[-5]) if len(sb) >= 5 else 0
-    # 融資餘額(億) vs 前高比較，用於研判是否過熱
-    mb_max = float(mb.max()) if len(mb) > 0 else 1
-    heat = float(mb.iloc[-1]) / mb_max if mb_max > 0 else 0
+        records = [{'date': d,
+                    'margin_bal': daily_m[d],
+                    'short_bal':  daily_s[d]} for d in dates]
 
-    return {
-        'df':          df_m,
-        'margin_bal':  mb,
-        'short_bal':   sb,
-        'margin_chg':  margin_chg,
-        'short_chg':   short_chg,
-        'cover_ratio': heat,   # 改為融資熱度（目前/歷史高）
-    }
+        df_m = pd.DataFrame(records).set_index('date')
+        df_m.index = pd.to_datetime(df_m.index)
+        df_m = df_m.sort_index()
+        mb = df_m['margin_bal']
+        sb = df_m['short_bal']
 
+        margin_chg = int(mb.iloc[-1] - mb.iloc[-5]) if len(mb) >= 5 else 0
+        short_chg  = int(sb.iloc[-1] - sb.iloc[-5]) if len(sb) >= 5 else 0
+        mb_max     = float(mb.max()) if len(mb) > 0 else 1
+        heat       = float(mb.iloc[-1]) / mb_max if mb_max > 0 else 0
+
+        return {
+            'df':          df_m,
+            'margin_bal':  mb,
+            'short_bal':   sb,
+            'margin_chg':  margin_chg,
+            'short_chg':   short_chg,
+            'cover_ratio': heat,
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+
+# ─────────────────────────────────────────────
+# 台指期貨三大法人未平倉淨額（FinMind）
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def fetch_futures_oi():
@@ -408,7 +418,7 @@ def fetch_futures_oi():
 
         # 自動偵測法人名稱欄位
         name_col = next(
-            (c for c in ['name', 'Name', 'identity_type', 'InstitutionalInvestors']
+            (c for c in ['institutional_investors', 'name', 'Name', 'identity_type', 'InstitutionalInvestors']
              if c in df_f.columns),
             None
         )
@@ -416,8 +426,8 @@ def fetch_futures_oi():
             return {'error': f'找不到法人名稱欄位，實際欄位：{list(df_f.columns)}'}
 
         # 多口/空口欄位名（FinMind 版本差異）
-        long_col  = next((c for c in ['long_open_interest_balance',  'LongOpenInterestBalance',  'long_balance']  if c in df_f.columns), None)
-        short_col = next((c for c in ['short_open_interest_balance', 'ShortOpenInterestBalance', 'short_balance'] if c in df_f.columns), None)
+        long_col  = next((c for c in ['long_open_interest_balance_volume', 'long_open_interest_balance', 'LongOpenInterestBalance', 'long_balance'] if c in df_f.columns), None)
+        short_col = next((c for c in ['short_open_interest_balance_volume', 'short_open_interest_balance', 'ShortOpenInterestBalance', 'short_balance'] if c in df_f.columns), None)
         if long_col is None or short_col is None:
             return {'error': f'找不到多空倉位欄位，實際欄位：{list(df_f.columns)}'}
 
@@ -1265,10 +1275,14 @@ if run_clicked:
     with st.spinner('📊 抓取本益比歷史資料（FinMind）...'):
         st.session_state.per_data = fetch_per_river(ticker) if ticker.endswith('.TW') else None
 
-    with st.spinner('📊 抓取大盤三大法人、融資融券、期貨法人資料...'):
-        st.session_state.three_inst  = fetch_three_institutions()
-        st.session_state.margin      = fetch_margin()
-        st.session_state.futures_oi  = fetch_futures_oi()
+    with st.spinner('📊 抓取三大法人、融資融券、期貨法人資料...'):
+        if ticker.endswith('.TW'):
+            st.session_state.three_inst  = fetch_three_institutions(ticker)
+            st.session_state.margin      = fetch_margin(ticker)
+        else:
+            st.session_state.three_inst  = None
+            st.session_state.margin      = None
+        st.session_state.futures_oi = fetch_futures_oi()
 
 elif st.session_state.df is None:
     st.info("👈 請在左側設定股票代碼與週期，再按「執行分析」開始")
@@ -1398,7 +1412,7 @@ elif not ticker.endswith('.TW'):
 st.markdown("---")
 st.subheader("🏦 籌碼面綜合分析")
 
-tab1, tab2, tab3 = st.tabs(["📋 大盤三大法人買賣超", "💳 大盤融資融券餘額", "📉 台指期貨法人未平倉"])
+tab1, tab2, tab3 = st.tabs(["📋 三大法人 30日買賣超", "💳 融資融券餘額", "📉 台指期貨法人未平倉"])
 
 # ── Tab1：三大法人 ──────────────────────────────────────────────────
 with tab1:
@@ -1409,9 +1423,9 @@ with tab1:
         # 摘要卡片
         s1, s2, s3, s4 = st.columns(4)
         for col_w, key, label in [
-            (s1, '外資',  '外資 大盤近10日'),
-            (s2, '投信',  '投信 大盤近10日'),
-            (s3, '自營商','自營商 大盤近10日'),
+            (s1, '外資',  '外資 近10日合計'),
+            (s2, '投信',  '投信 近10日合計'),
+            (s3, '自營商','自營商 近10日合計'),
             (s4, '合計',  '三大法人合計'),
         ]:
             val    = ti_sum[key]['total']
@@ -1436,7 +1450,7 @@ with tab1:
             height=320, barmode='group', hovermode='x unified',
             legend=dict(orientation='h', y=1.02),
             margin=dict(l=50, r=20, t=30, b=40),
-            yaxis_title='大盤買賣超（千股＝張）',
+            yaxis_title='買賣超（張）',
         )
         fig_ti.update_xaxes(gridcolor='#21262d')
         fig_ti.update_yaxes(gridcolor='#21262d', zeroline=True, zerolinecolor='#555')
@@ -1474,7 +1488,9 @@ with tab1:
                 width='stretch'
             )
     elif three_inst and 'error' in three_inst:
-        st.caption(f"大盤三大法人資料無法取得：{three_inst['error']}")
+        st.caption(f"三大法人資料無法取得：{three_inst['error']}")
+    else:
+        st.caption("三大法人資料僅支援台股（代碼需以 .TW 結尾）")
 
 # ── Tab2：融資融券 ──────────────────────────────────────────────────
 with tab2:
@@ -1489,13 +1505,13 @@ with tab2:
         m1, m2, m3, m4 = st.columns(4)
         with m1:
             val = int(mb.iloc[-1]) if not mb.empty else 0
-            st.metric("大盤融資餘額（億元）", f"{val:,}", f"近5日 {mg_chg:+,}")
+            st.metric("融資餘額（張）", f"{val:,}", f"近5日 {mg_chg:+,}")
         with m2:
             val = int(sb.iloc[-1]) if not sb.empty else 0
-            st.metric("大盤融券餘額（千張）", f"{val:,}", f"近5日 {sg_chg:+,}")
+            st.metric("融券餘額（張）", f"{val:,}", f"近5日 {sg_chg:+,}")
         with m3:
-            st.metric("融資熱度（目前/近期高）", f"{cover*100:.1f}%",
-                      "過熱警戒" if cover > 0.85 else ("偏熱" if cover > 0.7 else "正常"))
+            st.metric("融券/融資 覆蓋率", f"{cover*100:.1f}%",
+                      "空方佔優" if cover > 0.3 else "多方佔優")
         with m4:
             # 融資增 + 股價漲 → 正常多頭；融資減 + 股價漲 → 籌碼乾淨
             if mg_chg < 0:
@@ -1525,8 +1541,8 @@ with tab2:
             legend=dict(orientation='h', y=1.02),
             margin=dict(l=60, r=60, t=30, b=40),
         )
-        fig_mg.update_yaxes(title_text='大盤融資餘額（億元）', gridcolor='#21262d', secondary_y=False)
-        fig_mg.update_yaxes(title_text='大盤融券餘額（千張）', gridcolor='#21262d', secondary_y=True)
+        fig_mg.update_yaxes(title_text='融資餘額（張）', gridcolor='#21262d', secondary_y=False)
+        fig_mg.update_yaxes(title_text='融券餘額（張）', gridcolor='#21262d', secondary_y=True)
         fig_mg.update_xaxes(gridcolor='#21262d')
         st.plotly_chart(fig_mg, width='stretch')
 
@@ -1544,12 +1560,13 @@ with tab2:
             st.info("🟡 融資增加，散戶追多積極，需留意過度槓桿風險。"
                     "若外資同步買超則訊號較可信，否則需謹慎。")
 
-        st.caption(f"大盤融資熱度 {cover*100:.1f}%（目前餘額 ÷ 近期高點）。"
-                   "超過 85% 代表融資接近歷史高位，散戶槓桿過熱，回調風險上升。"
-                   "  資料來源：TWSE MI_MARGN 整體市場")
+        st.caption(f"融券覆蓋率（{cover*100:.1f}%）：融券張數 ÷ 融資張數。"
+                   "超過 30% 代表空頭部位相對重，軋空行情機率上升。")
 
     elif margin_data and 'error' in margin_data:
-        st.caption(f"大盤融資融券資料無法取得：{margin_data['error']}")
+        st.caption(f"融資融券資料無法取得：{margin_data['error']}")
+    else:
+        st.caption("融資融券資料僅支援台股（代碼需以 .TW 結尾）")
 
 # ── Tab3：台指期貨法人未平倉 ────────────────────────────────────────
 with tab3:
