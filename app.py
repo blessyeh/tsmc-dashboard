@@ -244,56 +244,94 @@ def fetch_institutional(ticker):
 @st.cache_data(ttl=1800)
 def fetch_three_institutions():
     """
-    大盤三大法人買賣超，以元大台灣50（0050）為代理指標
-    0050 持有加權指數前50大成份股，外資對其買賣超方向
-    高度代表大盤整體外資動向
-    dataset: TaiwanStockInstitutionalInvestorsBuySell, data_id=0050
+    大盤三大法人買賣超 — goodinfo.tw 加權指數
+    URL: https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=加權指數&CHT_CAT=DAT
+    解析 HTML 表格取得日期/外資/投信/自營商淨買超（億元）
     """
-    start_date = (datetime.now() - timedelta(days=50)).strftime('%Y-%m-%d')
+    import re
+    url = 'https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=DAT'
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                      'AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'Chrome/124.0.0.0 Safari/537.36',
+        'Referer':         'https://goodinfo.tw/tw/index.asp',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
+        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    }
     try:
-        url = (
-            'https://api.finmindtrade.com/api/v4/data'
-            f'?dataset=TaiwanStockInstitutionalInvestorsBuySell'
-            f'&data_id=0050&start_date={start_date}'
-        )
-        r = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        sess = requests.Session()
+        # 先拿首頁取 cookie
+        sess.get('https://goodinfo.tw/tw/index.asp', timeout=10, headers=headers)
+        r = sess.get(url, timeout=15, headers=headers)
         if r.status_code != 200:
-            return {'error': f'FinMind HTTP {r.status_code}'}
-        payload = r.json()
-        if payload.get('status') != 200:
-            return {'error': f"FinMind status={payload.get('status')} {payload.get('msg','')}"}
-        rows = payload.get('data', [])
-        if not rows:
-            return {'error': 'FinMind 無資料'}
+            return {'error': f'goodinfo HTTP {r.status_code}'}
 
-        GROUP = {
-            'Foreign_Investor':    '外資',
-            'Foreign_Dealer_Self': '外資',
-            'Investment_Trust':    '投信',
-            'Dealer_self':         '自營商',
-            'Dealer_Hedging':      '自營商',
-        }
-        from collections import defaultdict
-        daily = defaultdict(lambda: defaultdict(int))
-        for row in rows:
-            grp = GROUP.get(row.get('name', ''))
-            if grp is None:
-                continue
-            net = (int(row.get('buy', 0)) - int(row.get('sell', 0))) // 1000
-            daily[row['date']][grp] += net
+        # goodinfo 表格通常在 id="divDetail" 或 class="solid_1_padding_4_0_tbl"
+        # 用 pandas read_html 抓所有表格，找含「外資」的那張
+        tables = pd.read_html(r.text, flavor='lxml')
+        target = None
+        for t in tables:
+            cols = ' '.join(str(c) for c in t.columns.tolist())
+            flat = t.to_string()
+            if '外資' in flat or '外資' in cols:
+                target = t
+                break
 
-        dates = sorted(daily.keys(), reverse=True)[:30]
-        records = []
-        for d in dates:
-            rec = {'date': d}
-            for g in ['外資', '投信', '自營商']:
-                rec[g] = daily[d].get(g, 0)
-            rec['合計'] = rec['外資'] + rec['投信'] + rec['自營商']
-            records.append(rec)
+        if target is None:
+            # 嘗試找含日期+買超資料的表格
+            for t in tables:
+                if len(t.columns) >= 4 and len(t) >= 5:
+                    target = t
+                    break
 
-        df_inst = pd.DataFrame(records).set_index('date')
-        df_inst.index = pd.to_datetime(df_inst.index)
-        df_inst = df_inst.sort_index()
+        if target is None:
+            return {'error': f'goodinfo 找不到三大法人表格，共{len(tables)}張表'}
+
+        # 標準化欄位：嘗試識別日期、外資、投信、自營商、合計欄
+        df = target.copy()
+        # 展平多層欄位
+        if hasattr(df.columns, 'levels'):
+            df.columns = [' '.join(str(c) for c in col).strip() for col in df.columns]
+        df.columns = [str(c).strip() for c in df.columns]
+
+        # 找日期欄（含「日期」或「年/月/日」格式）
+        date_col = next((c for c in df.columns if '日期' in c or '日' == c[-1:]), None)
+        if date_col is None:
+            date_col = df.columns[0]
+
+        # 找各法人淨買超欄（含「淨」或「差」）
+        def find_col(df, keywords):
+            for c in df.columns:
+                if all(k in c for k in keywords):
+                    return c
+            for c in df.columns:
+                if any(k in c for k in keywords):
+                    return c
+            return None
+
+        foreign_col = find_col(df, ['外資', '淨']) or find_col(df, ['外資'])
+        trust_col   = find_col(df, ['投信', '淨']) or find_col(df, ['投信'])
+        dealer_col  = find_col(df, ['自營', '淨']) or find_col(df, ['自營'])
+
+        if not all([foreign_col, trust_col, dealer_col]):
+            return {'error': f'goodinfo 欄位解析失敗，實際欄位：{list(df.columns)}'}
+
+        def _to_num(s):
+            try:
+                return float(str(s).replace(',', '').replace('--', '0').strip() or 0)
+            except:
+                return 0.0
+
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        df = df.dropna(subset=[date_col])
+        df = df.set_index(date_col).sort_index()
+
+        df_inst = pd.DataFrame({
+            '外資':  df[foreign_col].apply(_to_num),
+            '投信':  df[trust_col].apply(_to_num),
+            '自營商': df[dealer_col].apply(_to_num),
+        }).tail(30)
+        df_inst['合計'] = df_inst['外資'] + df_inst['投信'] + df_inst['自營商']
 
         r10 = df_inst.tail(10)
         summary = {}
@@ -303,11 +341,11 @@ def fetch_three_institutions():
             for v in vals:
                 if v > 0: cnt += 1
                 else: break
-            summary[col] = {'total': int(r10[col].sum()), 'consec': cnt}
+            summary[col] = {'total': round(r10[col].sum(), 1), 'consec': cnt}
 
-        return {'df': df_inst, 'summary': summary, 'proxy': '0050'}
+        return {'df': df_inst, 'summary': summary, 'source': 'goodinfo'}
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': f'goodinfo 爬取失敗：{e}'}
 
 
 # ─────────────────────────────────────────────
@@ -316,56 +354,117 @@ def fetch_three_institutions():
 @st.cache_data(ttl=1800)
 def fetch_margin():
     """
-    融資融券以元大台灣50（0050）為代理指標，反映大型股槓桿情緒
-    dataset: TaiwanStockMarginPurchaseShortSale, data_id=0050
+    大盤整體融資融券餘額 — TWSE mi-margn.html 整體市場
+    先嘗試 JSON API，失敗則解析 HTML 頁面
     """
-    start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
-    try:
-        url = (
-            'https://api.finmindtrade.com/api/v4/data'
-            f'?dataset=TaiwanStockMarginPurchaseShortSale'
-            f'&data_id=0050&start_date={start_date}'
-        )
-        r = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
-        if r.status_code != 200:
-            return {'error': f'FinMind HTTP {r.status_code}'}
-        payload = r.json()
-        if payload.get('status') != 200:
-            return {'error': f"FinMind status={payload.get('status')} {payload.get('msg','')}"}
-        rows = payload.get('data', [])
-        if not rows:
-            return {'error': 'FinMind 無資料'}
+    headers = {
+        'User-Agent':  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                       'AppleWebKit/537.36 (KHTML, like Gecko) '
+                       'Chrome/124.0.0.0 Safari/537.36',
+        'Referer':     'https://www.twse.com.tw/zh/',
+        'Accept':      'text/html,application/xhtml+xml,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9',
+    }
+    records = {}
+    now = datetime.now()
 
-        df_m = pd.DataFrame(rows)
-        df_m['date'] = pd.to_datetime(df_m['date'])
-        df_m = df_m.set_index('date').sort_index()
+    def _roc_to_ts(s):
+        p = str(s).strip().split('/')
+        if len(p) == 3:
+            return pd.Timestamp(f"{int(p[0])+1911}-{p[1]}-{p[2]}")
+        return pd.NaT
 
-        num_cols = ['MarginPurchaseTodayBalance', 'ShortSaleTodayBalance',
-                    'MarginPurchaseBuy', 'MarginPurchaseSell',
-                    'ShortSaleBuy', 'ShortSaleSell']
-        for c in num_cols:
-            if c in df_m.columns:
-                df_m[c] = pd.to_numeric(df_m[c], errors='coerce')
-        df_m = df_m[[c for c in num_cols if c in df_m.columns]].dropna(how='all')
+    def _n(s):
+        try: return int(str(s).replace(',','').strip() or 0)
+        except: return 0
 
-        mb = df_m['MarginPurchaseTodayBalance'] if 'MarginPurchaseTodayBalance' in df_m else pd.Series(dtype=float)
-        sb = df_m['ShortSaleTodayBalance']      if 'ShortSaleTodayBalance'      in df_m else pd.Series(dtype=float)
-        margin_chg = int(mb.iloc[-1] - mb.iloc[-5]) if len(mb) >= 5 else 0
-        short_chg  = int(sb.iloc[-1] - sb.iloc[-5]) if len(sb) >= 5 else 0
-        mb_max = float(mb.max()) if len(mb) > 0 else 1
-        heat   = float(mb.iloc[-1]) / mb_max if mb_max > 0 else 0
+    # ── 方法 A：JSON API（各月）────────────────────
+    for m in range(4):
+        d  = now.replace(day=1) - timedelta(days=30 * m)
+        ds = d.strftime('%Y%m01')
+        for base in [
+            'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN',
+            'https://www.twse.com.tw/marginTrading/MI_MARGN',
+        ]:
+            try:
+                r = requests.get(
+                    f'{base}?response=json&date={ds}&selectType=MS',
+                    timeout=10, headers=headers
+                )
+                if r.status_code != 200:
+                    continue
+                j = r.json()
+                if j.get('stat') not in ('OK', 'ok'):
+                    continue
+                fields = j.get('fields', [])
+                mb_idx = next((i for i, f in enumerate(fields)
+                               if '融資' in f and '餘額' in f), 4)
+                sb_idx = next((i for i, f in enumerate(fields)
+                               if '融券' in f and '餘額' in f), 9)
+                for row in j.get('data', []):
+                    try:
+                        dt = _roc_to_ts(row[0])
+                        if pd.isna(dt): continue
+                        records[dt] = {'margin_bal': _n(row[mb_idx]),
+                                       'short_bal':  _n(row[sb_idx])}
+                    except (IndexError, ValueError):
+                        continue
+                break
+            except Exception:
+                continue
 
-        return {
-            'df':          df_m,
-            'margin_bal':  mb,
-            'short_bal':   sb,
-            'margin_chg':  margin_chg,
-            'short_chg':   short_chg,
-            'cover_ratio': heat,
-            'proxy':       '0050',
-        }
-    except Exception as e:
-        return {'error': str(e)}
+    # ── 方法 B：HTML 頁面直接解析 ────────────────────
+    if not records:
+        try:
+            r = requests.get(
+                'https://www.twse.com.tw/zh/trading/margin/mi-margn.html',
+                timeout=12, headers=headers
+            )
+            if r.status_code == 200:
+                tables = pd.read_html(r.text, flavor='lxml')
+                for t in tables:
+                    flat = t.to_string()
+                    if '融資' in flat and '融券' in flat and len(t) >= 5:
+                        df_raw = t.copy()
+                        if hasattr(df_raw.columns, 'levels'):
+                            df_raw.columns = [' '.join(str(c) for c in col).strip()
+                                              for col in df_raw.columns]
+                        df_raw.columns = [str(c).strip() for c in df_raw.columns]
+                        date_col = df_raw.columns[0]
+                        mb_col = next((c for c in df_raw.columns if '融資' in c and '餘額' in c), None)
+                        sb_col = next((c for c in df_raw.columns if '融券' in c and '餘額' in c), None)
+                        if mb_col and sb_col:
+                            for _, row in df_raw.iterrows():
+                                dt = _roc_to_ts(row[date_col])
+                                if pd.isna(dt): continue
+                                records[dt] = {'margin_bal': _n(row[mb_col]),
+                                               'short_bal':  _n(row[sb_col])}
+                        break
+        except Exception:
+            pass
+
+    if not records:
+        return {'error': 'TWSE 融資融券：JSON API 與 HTML 頁面皆無法取得'}
+
+    df_m = pd.DataFrame.from_dict(records, orient='index')
+    df_m.index = pd.DatetimeIndex(df_m.index)
+    df_m = df_m.sort_index()
+    mb = df_m['margin_bal']
+    sb = df_m['short_bal']
+    margin_chg = int(mb.iloc[-1] - mb.iloc[-5]) if len(mb) >= 5 else 0
+    short_chg  = int(sb.iloc[-1] - sb.iloc[-5]) if len(sb) >= 5 else 0
+    mb_max = float(mb.max()) if len(mb) > 0 else 1
+    heat   = float(mb.iloc[-1]) / mb_max if mb_max > 0 else 0
+
+    return {
+        'df':          df_m,
+        'margin_bal':  mb,
+        'short_bal':   sb,
+        'margin_chg':  margin_chg,
+        'short_chg':   short_chg,
+        'cover_ratio': heat,
+        'source':      'TWSE',
+    }
 
 
 # ─────────────────────────────────────────────
