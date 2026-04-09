@@ -244,68 +244,78 @@ def fetch_institutional(ticker):
 @st.cache_data(ttl=1800)
 def fetch_three_institutions():
     """
-    大盤整體三大法人買賣超（FinMind 全市場加總，近 30 交易日）
-    來源：TaiwanStockInstitutionalInvestorsBuySell（不帶 data_id）
+    大盤整體三大法人買賣超（TWSE T86，近 30 交易日）
+    同時嘗試舊版/新版 URL，並加上 Referer 以避免被擋
     """
-    start_date = (datetime.now() - timedelta(days=50)).strftime('%Y-%m-%d')
-    try:
-        url = (
-            'https://api.finmindtrade.com/api/v4/data'
-            f'?dataset=TaiwanStockInstitutionalInvestorsBuySell'
-            f'&start_date={start_date}'
-        )
-        r = requests.get(url, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
-        if r.status_code != 200:
-            return {'error': f'FinMind HTTP {r.status_code}'}
-        payload = r.json()
-        if payload.get('status') != 200:
-            return {'error': f"FinMind status={payload.get('status')} {payload.get('msg','')}"}
-        rows = payload.get('data', [])
-        if not rows:
-            return {'error': 'FinMind 無資料'}
+    from collections import defaultdict
 
-        GROUP = {
-            'Foreign_Investor':    '外資',
-            'Foreign_Dealer_Self': '外資',
-            'Investment_Trust':    '投信',
-            'Dealer_self':         '自營商',
-            'Dealer_Hedging':      '自營商',
-        }
-        from collections import defaultdict
-        daily = defaultdict(lambda: defaultdict(int))
-        for row in rows:
-            grp = GROUP.get(row.get('name', ''))
-            if grp is None:
+    def _roc_to_ts(s):
+        p = s.strip().split('/')
+        return pd.Timestamp(f"{int(p[0])+1911}-{p[1]}-{p[2]}")
+
+    def _n(s):
+        try: return int(str(s).replace(',','').strip() or 0)
+        except: return 0
+
+    records = {}
+    now = datetime.now()
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer':    'https://www.twse.com.tw/zh/fund/T86',
+        'Accept':     'application/json, text/plain, */*',
+    }
+
+    for m in range(4):          # 多取一個月，確保夠 30 筆
+        d = now.replace(day=1) - timedelta(days=30 * m)
+        ds = d.strftime('%Y%m01')
+        for base in [
+            'https://www.twse.com.tw/rwd/zh/fund/T86',
+            'https://www.twse.com.tw/fund/T86',
+        ]:
+            try:
+                r = requests.get(f'{base}?response=json&date={ds}',
+                                 timeout=12, headers=headers)
+                if r.status_code != 200:
+                    continue
+                j = r.json()
+                if j.get('stat') not in ('OK', 'ok'):
+                    continue
+                for row in j.get('data', []):
+                    try:
+                        dt = _roc_to_ts(row[0])
+                        # T86 每3欄一組：[1-3]外資及陸資 [4-6]外資自營商
+                        # [7-9]投信 [10-12]自營商自行 [13-15]自營商避險 [16-18]合計
+                        foreign = _n(row[3]) + _n(row[6])
+                        trust   = _n(row[9])
+                        dealer  = _n(row[12]) + _n(row[15])
+                        total   = _n(row[18])
+                        records[dt] = {'外資': foreign, '投信': trust,
+                                       '自營商': dealer, '合計': total}
+                    except (IndexError, ValueError):
+                        continue
+                if records:
+                    break   # 此月已成功，跳出 URL loop
+            except Exception:
                 continue
-            net = (int(row.get('buy', 0)) - int(row.get('sell', 0))) // 1000
-            daily[row['date']][grp] += net
 
-        dates = sorted(daily.keys(), reverse=True)[:30]
-        records = []
-        for d in dates:
-            rec = {'date': d}
-            for g in ['外資', '投信', '自營商']:
-                rec[g] = daily[d].get(g, 0)
-            rec['合計'] = rec['外資'] + rec['投信'] + rec['自營商']
-            records.append(rec)
+    if not records:
+        return {'error': 'TWSE T86 無法取得資料（可能被防火牆封鎖）'}
 
-        df_inst = pd.DataFrame(records).set_index('date')
-        df_inst.index = pd.to_datetime(df_inst.index)
-        df_inst = df_inst.sort_index()
+    df_inst = pd.DataFrame.from_dict(records, orient='index')
+    df_inst.index = pd.DatetimeIndex(df_inst.index)
+    df_inst = df_inst.sort_index().iloc[-30:]
 
-        r10 = df_inst.tail(10)
-        summary = {}
-        for col in ['外資', '投信', '自營商', '合計']:
-            vals = df_inst[col].iloc[::-1].tolist()
-            cnt = 0
-            for v in vals:
-                if v > 0: cnt += 1
-                else: break
-            summary[col] = {'total': int(r10[col].sum()), 'consec': cnt}
+    r10 = df_inst.tail(10)
+    summary = {}
+    for col in ['外資', '投信', '自營商', '合計']:
+        vals = df_inst[col].iloc[::-1].tolist()
+        cnt = 0
+        for v in vals:
+            if v > 0: cnt += 1
+            else: break
+        summary[col] = {'total': int(r10[col].sum()), 'consec': cnt}
 
-        return {'df': df_inst, 'summary': summary}
-    except Exception as e:
-        return {'error': str(e)}
+    return {'df': df_inst, 'summary': summary}
 
 
 # ─────────────────────────────────────────────
@@ -314,65 +324,81 @@ def fetch_three_institutions():
 @st.cache_data(ttl=1800)
 def fetch_margin():
     """
-    大盤整體融資融券餘額（FinMind 全市場加總，近 60 個交易日）
-    來源：TaiwanStockMarginPurchaseShortSale（不帶 data_id）
-    融資餘額 / 融券餘額單位：張
+    大盤整體融資融券餘額（TWSE MI_MARGN selectType=MS，近 3 個月）
+    融資單位：億元；融券單位：千張
     """
-    start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
-    try:
-        url = (
-            'https://api.finmindtrade.com/api/v4/data'
-            f'?dataset=TaiwanStockMarginPurchaseShortSale'
-            f'&start_date={start_date}'
-        )
-        r = requests.get(url, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
-        if r.status_code != 200:
-            return {'error': f'FinMind HTTP {r.status_code}'}
-        payload = r.json()
-        if payload.get('status') != 200:
-            return {'error': f"FinMind status={payload.get('status')} {payload.get('msg','')}"}
-        rows = payload.get('data', [])
-        if not rows:
-            return {'error': 'FinMind 無資料'}
+    def _roc_to_ts(s):
+        p = s.strip().split('/')
+        return pd.Timestamp(f"{int(p[0])+1911}-{p[1]}-{p[2]}")
 
-        from collections import defaultdict
-        daily_m = defaultdict(int)
-        daily_s = defaultdict(int)
-        for row in rows:
-            d = row.get('date', '')
+    def _n(s):
+        try: return int(str(s).replace(',','').strip() or 0)
+        except: return 0
+
+    records = {}
+    now = datetime.now()
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer':    'https://www.twse.com.tw/zh/marginTrading/MI_MARGN',
+        'Accept':     'application/json, text/plain, */*',
+    }
+
+    for m in range(4):
+        d = now.replace(day=1) - timedelta(days=30 * m)
+        ds = d.strftime('%Y%m01')
+        for base in [
+            'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN',
+            'https://www.twse.com.tw/marginTrading/MI_MARGN',
+        ]:
             try:
-                daily_m[d] += int(row.get('MarginPurchaseTodayBalance', 0) or 0)
-                daily_s[d] += int(row.get('ShortSaleTodayBalance',      0) or 0)
-            except (ValueError, TypeError):
+                r = requests.get(f'{base}?response=json&date={ds}&selectType=MS',
+                                 timeout=12, headers=headers)
+                if r.status_code != 200:
+                    continue
+                j = r.json()
+                if j.get('stat') not in ('OK', 'ok'):
+                    continue
+                fields = j.get('fields', [])
+                # 動態找欄位索引（融資今日餘額 / 融券今日餘額）
+                mb_idx = next((i for i, f in enumerate(fields)
+                               if '融資' in f and '餘額' in f), 4)
+                sb_idx = next((i for i, f in enumerate(fields)
+                               if '融券' in f and '餘額' in f), 9)
+                for row in j.get('data', []):
+                    try:
+                        dt = _roc_to_ts(row[0])
+                        records[dt] = {
+                            'margin_bal': _n(row[mb_idx]),
+                            'short_bal':  _n(row[sb_idx]),
+                        }
+                    except (IndexError, ValueError):
+                        continue
+                if records:
+                    break
+            except Exception:
                 continue
 
-        dates = sorted(daily_m.keys())[-60:]
-        if not dates:
-            return {'error': '加總後無資料'}
+    if not records:
+        return {'error': 'TWSE MI_MARGN 無法取得資料（可能被防火牆封鎖）'}
 
-        records = [{'date': d, 'margin_bal': daily_m[d], 'short_bal': daily_s[d]}
-                   for d in dates]
-        df_m = pd.DataFrame(records).set_index('date')
-        df_m.index = pd.to_datetime(df_m.index)
-        df_m = df_m.sort_index()
-        mb = df_m['margin_bal']
-        sb = df_m['short_bal']
+    df_m = pd.DataFrame.from_dict(records, orient='index')
+    df_m.index = pd.DatetimeIndex(df_m.index)
+    df_m = df_m.sort_index()
+    mb = df_m['margin_bal']
+    sb = df_m['short_bal']
+    margin_chg = int(mb.iloc[-1] - mb.iloc[-5]) if len(mb) >= 5 else 0
+    short_chg  = int(sb.iloc[-1] - sb.iloc[-5]) if len(sb) >= 5 else 0
+    mb_max     = float(mb.max()) if len(mb) > 0 else 1
+    heat       = float(mb.iloc[-1]) / mb_max if mb_max > 0 else 0
 
-        margin_chg = int(mb.iloc[-1] - mb.iloc[-5]) if len(mb) >= 5 else 0
-        short_chg  = int(sb.iloc[-1] - sb.iloc[-5]) if len(sb) >= 5 else 0
-        mb_max     = float(mb.max()) if len(mb) > 0 else 1
-        heat       = float(mb.iloc[-1]) / mb_max if mb_max > 0 else 0
-
-        return {
-            'df':          df_m,
-            'margin_bal':  mb,
-            'short_bal':   sb,
-            'margin_chg':  margin_chg,
-            'short_chg':   short_chg,
-            'cover_ratio': heat,
-        }
-    except Exception as e:
-        return {'error': str(e)}
+    return {
+        'df':          df_m,
+        'margin_bal':  mb,
+        'short_bal':   sb,
+        'margin_chg':  margin_chg,
+        'short_chg':   short_chg,
+        'cover_ratio': heat,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -425,20 +451,21 @@ def fetch_futures_oi():
         if long_col is None or short_col is None:
             return {'error': f'找不到多空倉位欄位，實際欄位：{list(df_f.columns)}'}
 
-        # 法人分組（同時支援中文舊版與英文新版名稱）
-        GROUP = {
-            '自營商':             '自營商',
-            'Dealer':             '自營商',
-            '投信':               '投信',
-            'Investment_Trust':   '投信',
-            '外資及大陸地區':     '外資',
-            'Foreign_Investor':   '外資',
-            'Foreign_Dealer_Self':'外資',
-        }
+        # 法人分組 — 用 partial match 避免名稱變體（空白/大小寫/全半形）
+        def _get_grp(name: str) -> str | None:
+            n = str(name).strip()
+            if '外資' in n or 'Foreign' in n:
+                return '外資'
+            if '投信' in n or 'Investment_Trust' in n:
+                return '投信'
+            if '自營' in n or 'Dealer' in n:
+                return '自營商'
+            return None
+
         from collections import defaultdict
         daily_net = defaultdict(lambda: defaultdict(int))
         for _, row in df_f.iterrows():
-            grp = GROUP.get(str(row.get(name_col, '')))
+            grp = _get_grp(str(row.get(name_col, '')))
             if grp is None:
                 continue
             net = int(row.get(long_col, 0) or 0) - int(row.get(short_col, 0) or 0)
@@ -1270,8 +1297,12 @@ if run_clicked:
         st.session_state.per_data = fetch_per_river(ticker) if ticker.endswith('.TW') else None
 
     with st.spinner('📊 抓取三大法人、融資融券、期貨法人資料...'):
-        st.session_state.three_inst  = fetch_three_institutions()
-        st.session_state.margin      = fetch_margin()
+        if ticker.endswith('.TW'):
+            st.session_state.three_inst  = fetch_three_institutions()
+            st.session_state.margin      = fetch_margin()
+        else:
+            st.session_state.three_inst  = None
+            st.session_state.margin      = None
         st.session_state.futures_oi = fetch_futures_oi()
 
 elif st.session_state.df is None:
@@ -1479,7 +1510,8 @@ with tab1:
             )
     elif three_inst and 'error' in three_inst:
         st.caption(f"三大法人資料無法取得：{three_inst['error']}")
-
+    else:
+        st.caption("三大法人資料僅支援台股（代碼需以 .TW 結尾）")
 
 # ── Tab2：融資融券 ──────────────────────────────────────────────────
 with tab2:
@@ -1554,7 +1586,8 @@ with tab2:
 
     elif margin_data and 'error' in margin_data:
         st.caption(f"融資融券資料無法取得：{margin_data['error']}")
-
+    else:
+        st.caption("融資融券資料僅支援台股（代碼需以 .TW 結尾）")
 
 # ── Tab3：台指期貨法人未平倉 ────────────────────────────────────────
 with tab3:
