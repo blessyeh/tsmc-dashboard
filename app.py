@@ -238,84 +238,55 @@ def fetch_institutional(ticker):
 
 
 
-# ─────────────────────────────────────────────
-# 三大法人 30 天買賣超（FinMind）
-# ─────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def fetch_three_institutions():
-    """大盤三大法人買賣超 — goodinfo.tw（bs4+html.parser，無需 lxml/html5lib）"""
-    url = ('https://goodinfo.tw/tw/ShowBuySaleChart.asp'
-           '?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=DAT')
-    headers = {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer':         'https://goodinfo.tw/tw/index.asp',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
-    }
+    """大盤三大法人買賣超 — FinMind"""
+    start_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
     try:
-        from bs4 import BeautifulSoup
-        sess = requests.Session()
-        sess.get('https://goodinfo.tw/tw/index.asp', timeout=10, headers=headers)
-        r = sess.get(url, timeout=15, headers=headers)
-        if r.status_code != 200:
-            return {'error': f'goodinfo HTTP {r.status_code}'}
-        r.encoding = 'utf-8'
+        url = (
+            'https://api.finmindtrade.com/api/v4/data'
+            f'?dataset=TaiwanStockTotalInstitutionalInvestors'
+            f'&start_date={start_date}'
+        )
+        resp = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        if resp.status_code != 200:
+            return {'error': f'FinMind HTTP {resp.status_code}'}
+        payload = resp.json()
+        raw_data = payload.get('data', [])
+        if not raw_data:
+            return {'error': 'FinMind 三大法人：無資料'}
 
-        soup = BeautifulSoup(r.text, 'html.parser')
-        tables = soup.find_all('table')
+        df_raw = pd.DataFrame(raw_data)
+        df_raw['date'] = pd.to_datetime(df_raw['date'])
 
-        target_df = None
-        for tbl in tables:
-            text = tbl.get_text()
-            if '外資' not in text and '投信' not in text:
-                continue
-            rows = tbl.find_all('tr')
-            if len(rows) < 5:
-                continue
-            data = [[c.get_text(strip=True) for c in tr.find_all(['th','td'])]
-                    for tr in rows]
-            max_c = max(len(r) for r in data)
-            data  = [r + ['']*(max_c-len(r)) for r in data]
-            # 找標題行（含「外資」的那行）
-            header_idx = next((i for i, row in enumerate(data)
-                               if any('外資' in c or '投信' in c for c in row)), 0)
-            headers_row = data[header_idx]
-            body = data[header_idx+1:]
-            target_df = pd.DataFrame(body, columns=headers_row)
-            break
+        # 法人對應關係
+        # Foreign_Investor, Investment_Trust, Dealer_self, Dealer_Hedging
+        from collections import defaultdict
+        daily_net = defaultdict(lambda: defaultdict(float))
+        for _, row in df_raw.iterrows():
+            d = row['date']
+            n = row['name']
+            net = (float(row.get('buy', 0)) - float(row.get('sell', 0))) / 1e8 # 單位：億
+            if n == 'Foreign_Investor':
+                daily_net[d]['外資'] += net
+            elif n == 'Investment_Trust':
+                daily_net[d]['投信'] += net
+            elif n in ('Dealer_self', 'Dealer_Hedging'):
+                daily_net[d]['自營商'] += net
+            elif n == 'total':
+                daily_net[d]['合計'] += net
 
-        if target_df is None:
-            return {'error': 'goodinfo 找不到三大法人表格'}
+        dates = sorted(daily_net.keys())
+        records = []
+        for d in dates:
+            rec = {'date': d}
+            rec.update(daily_net[d])
+            # 如果資料中沒有 total，自行加總
+            if '合計' not in rec:
+                rec['合計'] = rec.get('外資', 0) + rec.get('投信', 0) + rec.get('自營商', 0)
+            records.append(rec)
 
-        cols = list(target_df.columns)
-
-        def _find(kws_must, kw_fallback):
-            for c in cols:
-                if all(k in c for k in kws_must): return c
-            for c in cols:
-                if kw_fallback in c: return c
-            return None
-
-        date_col    = _find(['日期'], '日')    or cols[0]
-        foreign_col = _find(['外資','淨'], '外資')
-        trust_col   = _find(['投信','淨'], '投信')
-        dealer_col  = _find(['自營','淨'], '自營')
-
-        if not all([foreign_col, trust_col, dealer_col]):
-            return {'error': f'欄位識別失敗，實際欄位：{cols}'}
-
-        def _n(s):
-            try: return float(str(s).replace(',','').replace('--','0').strip() or 0)
-            except: return 0.0
-
-        target_df[date_col] = pd.to_datetime(target_df[date_col], errors='coerce')
-        target_df = target_df.dropna(subset=[date_col]).set_index(date_col).sort_index()
-
-        df_inst = pd.DataFrame({
-            '外資':   target_df[foreign_col].apply(_n),
-            '投信':   target_df[trust_col].apply(_n),
-            '自營商': target_df[dealer_col].apply(_n),
-        }).tail(30)
-        df_inst['合計'] = df_inst['外資'] + df_inst['投信'] + df_inst['自營商']
+        df_inst = pd.DataFrame(records).set_index('date').sort_index()
 
         r10 = df_inst.tail(10)
         summary = {}
@@ -325,11 +296,11 @@ def fetch_three_institutions():
             for v in vals:
                 if v > 0: cnt += 1
                 else: break
-            summary[col] = {'total': round(r10[col].sum(), 1), 'consec': cnt}
+            summary[col] = {'total': round(float(r10[col].sum()), 1), 'consec': cnt}
 
-        return {'df': df_inst, 'summary': summary, 'source': 'goodinfo'}
+        return {'df': df_inst, 'summary': summary, 'source': 'FinMind'}
     except Exception as e:
-        return {'error': f'goodinfo 三大法人：{e}'}
+        return {'error': f'FinMind 三大法人：{e}'}
 
 
 # ─────────────────────────────────────────────
@@ -337,92 +308,74 @@ def fetch_three_institutions():
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def fetch_margin():
-    """大盤融資融券 — goodinfo.tw（bs4+html.parser，無需 lxml/html5lib）
-    使用加權指數的信用交易頁面
-    """
-    headers = {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer':         'https://goodinfo.tw/tw/index.asp',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
-    }
-    # goodinfo 加權指數信用交易（融資融券）正確 URL
-    candidates = [
-        'https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=CREDIT',
-        'https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=CREDIT_DAILY',
-        'https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=MARGIN',
-    ]
+    """大盤融資融券 — FinMind"""
+    start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
     try:
-        from bs4 import BeautifulSoup
-        sess = requests.Session()
-        sess.get('https://goodinfo.tw/tw/index.asp', timeout=10, headers=headers)
+        url = (
+            'https://api.finmindtrade.com/api/v4/data'
+            f'?dataset=TaiwanStockTotalMarginPurchaseShortSale'
+            f'&start_date={start_date}'
+        )
+        resp = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        if resp.status_code != 200:
+            return {'error': f'FinMind HTTP {resp.status_code}'}
+        payload = resp.json()
+        raw_data = payload.get('data', [])
+        if not raw_data:
+            return {'error': 'FinMind 融資融券：無資料'}
 
-        debug_cols = []
-        for url in candidates:
-            r = sess.get(url, timeout=15, headers=headers)
-            if r.status_code != 200:
-                continue
-            r.encoding = 'utf-8'
-            soup = BeautifulSoup(r.text, 'html.parser')
+        df_raw = pd.DataFrame(raw_data)
+        df_raw['date'] = pd.to_datetime(df_raw['date'])
 
-            for tbl in soup.find_all('table'):
-                text = tbl.get_text()
-                if '融資' not in text and '信用' not in text:
-                    continue
-                rows = tbl.find_all('tr')
-                if len(rows) < 5:
-                    continue
-                data = [[c.get_text(strip=True) for c in tr.find_all(['th','td'])]
-                        for tr in rows]
-                max_c = max(len(r) for r in data)
-                data  = [r + ['']*(max_c-len(r)) for r in data]
-                header_idx = next(
-                    (i for i, row in enumerate(data)
-                     if any('融資' in c or '融券' in c for c in row)), 0)
-                header_row = data[header_idx]
-                body = data[header_idx+1:]
-                df_raw = pd.DataFrame(body, columns=header_row)
-                cols = list(df_raw.columns)
-                debug_cols.append(cols)
+        # name: MarginPurchaseMoney (融資金額), ShortSale (融券張數)
+        from collections import defaultdict
+        daily = defaultdict(lambda: defaultdict(float))
+        for _, row in df_raw.iterrows():
+            d = row['date']
+            n = row['name']
+            val = float(row.get('TodayBalance', 0))
+            if n == 'MarginPurchaseMoney':
+                daily[d]['margin_bal'] = val / 1e8 # 億元
+            elif n == 'ShortSale':
+                daily[d]['short_bal'] = val # 張
 
-                mb_col = next((c for c in cols if '融資' in c and
-                               any(k in c for k in ['餘額','餘','Balance'])), None)
-                sb_col = next((c for c in cols if '融券' in c and
-                               any(k in c for k in ['餘額','餘','Balance'])), None)
+        dates = sorted(daily.keys())
+        records = []
+        for d in dates:
+            if 'margin_bal' in daily[d] or 'short_bal' in daily[d]:
+                records.append({
+                    'date': d,
+                    'margin_bal': daily[d].get('margin_bal', 0),
+                    'short_bal': daily[d].get('short_bal', 0)
+                })
+        
+        df_margin = pd.DataFrame(records).set_index('date').sort_index()
+        # 移除 0 的資料（可能是當日尚未更新）
+        df_margin = df_margin[df_margin['margin_bal'] > 0]
+        
+        if df_margin.empty:
+            return {'error': 'FinMind 融資融券：資料處理後為空'}
 
-                if not mb_col or not sb_col:
-                    continue
+        mb = df_margin['margin_bal']
+        sb = df_margin['short_bal']
+        
+        margin_chg = round(float(mb.iloc[-1] - mb.iloc[-5]), 1) if len(mb) >= 5 else 0.0
+        short_chg  = int(sb.iloc[-1] - sb.iloc[-5]) if len(sb) >= 5 else 0
+        mb_max = float(mb.max()) if len(mb) > 0 else 1.0
+        heat   = float(mb.iloc[-1]) / mb_max if mb_max > 0 else 0.0
 
-                def _n(s):
-                    try: return float(str(s).replace(',','').replace('--','0').strip() or 0)
-                    except: return 0.0
-
-                date_col = cols[0]
-                df_raw[date_col] = pd.to_datetime(df_raw[date_col], errors='coerce')
-                df_raw = df_raw.dropna(subset=[date_col]).set_index(date_col).sort_index()
-
-                mb = df_raw[mb_col].apply(_n)
-                sb = df_raw[sb_col].apply(_n)
-                mb = mb[mb > 0].tail(60)
-                sb = sb.reindex(mb.index).fillna(0)
-
-                margin_chg = int(mb.iloc[-1] - mb.iloc[-5]) if len(mb) >= 5 else 0
-                short_chg  = int(sb.iloc[-1] - sb.iloc[-5]) if len(sb) >= 5 else 0
-                mb_max = float(mb.max()) if len(mb) > 0 else 1
-                heat   = float(mb.iloc[-1]) / mb_max if mb_max > 0 else 0
-
-                return {
-                    'df':          pd.DataFrame({'margin_bal': mb, 'short_bal': sb}),
-                    'margin_bal':  mb,
-                    'short_bal':   sb,
-                    'margin_chg':  margin_chg,
-                    'short_chg':   short_chg,
-                    'cover_ratio': heat,
-                    'source':      'goodinfo',
-                }
-
-        return {'error': f'goodinfo 融資融券：找不到融資/融券餘額欄，抓到欄位：{debug_cols[:3]}'}
+        return {
+            'df':          df_margin,
+            'margin_bal':  mb,
+            'short_bal':   sb,
+            'margin_chg':  margin_chg,
+            'short_chg':   short_chg,
+            'cover_ratio': heat,
+            'source':      'FinMind',
+        }
     except Exception as e:
-        return {'error': f'goodinfo 融資融券：{e}'}
+        return {'error': f'FinMind 融資融券：{e}'}
+
 
 
 # ─────────────────────────────────────────────
