@@ -245,10 +245,7 @@ def fetch_institutional(ticker):
 def fetch_three_institutions():
     """
     大盤整體三大法人買賣超（FinMind 全市場加總，近 30 交易日）
-    dataset: TaiwanStockInstitutionalInvestorsBuySell（不帶 data_id = 全市場）
-    name 欄位：Foreign_Investor、Foreign_Dealer_Self、Investment_Trust、
-               Dealer_self、Dealer_Hedging
-    單位：張（原始股數 // 1000）
+    來源：TaiwanStockInstitutionalInvestorsBuySell（不帶 data_id）
     """
     start_date = (datetime.now() - timedelta(days=50)).strftime('%Y-%m-%d')
     try:
@@ -312,15 +309,14 @@ def fetch_three_institutions():
 
 
 # ─────────────────────────────────────────────
-# 大盤整體融資融券餘額（FinMind 全市場加總）
+# 融資融券餘額（FinMind）
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=1800)
 def fetch_margin():
     """
-    大盤整體融資融券餘額（近 60 個交易日加總）
-    dataset: TaiwanStockMarginPurchaseShortSale（不帶 data_id = 全市場）
-    MarginPurchaseTodayBalance：融資餘額（張）
-    ShortSaleTodayBalance：     融券餘額（張）
+    大盤整體融資融券餘額（FinMind 全市場加總，近 60 個交易日）
+    來源：TaiwanStockMarginPurchaseShortSale（不帶 data_id）
+    融資餘額 / 融券餘額單位：張
     """
     start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
     try:
@@ -354,10 +350,8 @@ def fetch_margin():
         if not dates:
             return {'error': '加總後無資料'}
 
-        records = [{'date': d,
-                    'margin_bal': daily_m[d],
-                    'short_bal':  daily_s[d]} for d in dates]
-
+        records = [{'date': d, 'margin_bal': daily_m[d], 'short_bal': daily_s[d]}
+                   for d in dates]
         df_m = pd.DataFrame(records).set_index('date')
         df_m.index = pd.to_datetime(df_m.index)
         df_m = df_m.sort_index()
@@ -1276,12 +1270,8 @@ if run_clicked:
         st.session_state.per_data = fetch_per_river(ticker) if ticker.endswith('.TW') else None
 
     with st.spinner('📊 抓取三大法人、融資融券、期貨法人資料...'):
-        if ticker.endswith('.TW'):
-            st.session_state.three_inst  = fetch_three_institutions(ticker)
-            st.session_state.margin      = fetch_margin(ticker)
-        else:
-            st.session_state.three_inst  = None
-            st.session_state.margin      = None
+        st.session_state.three_inst  = fetch_three_institutions()
+        st.session_state.margin      = fetch_margin()
         st.session_state.futures_oi = fetch_futures_oi()
 
 elif st.session_state.df is None:
@@ -1489,8 +1479,7 @@ with tab1:
             )
     elif three_inst and 'error' in three_inst:
         st.caption(f"三大法人資料無法取得：{three_inst['error']}")
-    else:
-        st.caption("三大法人資料僅支援台股（代碼需以 .TW 結尾）")
+
 
 # ── Tab2：融資融券 ──────────────────────────────────────────────────
 with tab2:
@@ -1565,8 +1554,7 @@ with tab2:
 
     elif margin_data and 'error' in margin_data:
         st.caption(f"融資融券資料無法取得：{margin_data['error']}")
-    else:
-        st.caption("融資融券資料僅支援台股（代碼需以 .TW 結尾）")
+
 
 # ── Tab3：台指期貨法人未平倉 ────────────────────────────────────────
 with tab3:
