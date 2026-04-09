@@ -242,148 +242,187 @@ def fetch_institutional(ticker):
 # 三大法人 30 天買賣超（FinMind）
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=1800)
-def fetch_three_institutions(ticker):
-    """
-    三大法人近 30 個交易日買賣超
-    dataset: TaiwanStockInstitutionalInvestorsBuySell
-    name 欄位：Foreign_Investor、Investment_Trust、Dealer_self、Dealer_Hedging、Foreign_Dealer_Self
-    """
-    if not ticker.endswith('.TW'):
-        return None
-    stock_code = ticker.replace('.TW', '')
-    start_date = (datetime.now() - timedelta(days=50)).strftime('%Y-%m-%d')
+def fetch_three_institutions():
+    """大盤三大法人買賣超 — goodinfo.tw（bs4+html.parser，無需 lxml/html5lib）"""
+    url = ('https://goodinfo.tw/tw/ShowBuySaleChart.asp'
+           '?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=DAT')
+    headers = {
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer':         'https://goodinfo.tw/tw/index.asp',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
+    }
     try:
-        url = (
-            'https://api.finmindtrade.com/api/v4/data'
-            f'?dataset=TaiwanStockInstitutionalInvestorsBuySell'
-            f'&data_id={stock_code}&start_date={start_date}'
-        )
-        r = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
-        if r.status_code != 200 or r.json().get('status') != 200:
-            return {'error': f'HTTP {r.status_code}'}
-        rows = r.json().get('data', [])
-        if not rows:
-            return {'error': '無資料'}
+        from bs4 import BeautifulSoup
+        sess = requests.Session()
+        sess.get('https://goodinfo.tw/tw/index.asp', timeout=10, headers=headers)
+        r = sess.get(url, timeout=15, headers=headers)
+        if r.status_code != 200:
+            return {'error': f'goodinfo HTTP {r.status_code}'}
+        r.encoding = 'utf-8'
 
-        # 法人名稱對應
-        GROUP = {
-            'Foreign_Investor':    '外資',
-            'Foreign_Dealer_Self': '外資',        # 合併入外資
-            'Investment_Trust':    '投信',
-            'Dealer_self':         '自營商',
-            'Dealer_Hedging':      '自營商',       # 合併入自營商
-        }
-        from collections import defaultdict
-        # {date: {法人: net_張}}
-        daily = defaultdict(lambda: defaultdict(int))
-        for row in rows:
-            name   = row.get('name', '')
-            group  = GROUP.get(name)
-            if group is None:
+        soup = BeautifulSoup(r.text, 'html.parser')
+        tables = soup.find_all('table')
+
+        target_df = None
+        for tbl in tables:
+            text = tbl.get_text()
+            if '外資' not in text and '投信' not in text:
                 continue
-            net = (int(row.get('buy', 0)) - int(row.get('sell', 0))) // 1000
-            daily[row['date']][group] += net
+            rows = tbl.find_all('tr')
+            if len(rows) < 5:
+                continue
+            data = [[c.get_text(strip=True) for c in tr.find_all(['th','td'])]
+                    for tr in rows]
+            max_c = max(len(r) for r in data)
+            data  = [r + ['']*(max_c-len(r)) for r in data]
+            # 找標題行（含「外資」的那行）
+            header_idx = next((i for i, row in enumerate(data)
+                               if any('外資' in c or '投信' in c for c in row)), 0)
+            headers_row = data[header_idx]
+            body = data[header_idx+1:]
+            target_df = pd.DataFrame(body, columns=headers_row)
+            break
 
-        dates = sorted(daily.keys(), reverse=True)[:30]
-        records = []
-        for d in dates:
-            rec = {'date': d}
-            for g in ['外資', '投信', '自營商']:
-                rec[g] = daily[d].get(g, 0)
-            rec['合計'] = rec['外資'] + rec['投信'] + rec['自營商']
-            records.append(rec)
+        if target_df is None:
+            return {'error': 'goodinfo 找不到三大法人表格'}
 
-        df_inst = pd.DataFrame(records).set_index('date')
-        df_inst.index = pd.to_datetime(df_inst.index)
-        df_inst = df_inst.sort_index()
+        cols = list(target_df.columns)
 
-        # 統計摘要（近 10 日）
+        def _find(kws_must, kw_fallback):
+            for c in cols:
+                if all(k in c for k in kws_must): return c
+            for c in cols:
+                if kw_fallback in c: return c
+            return None
+
+        date_col    = _find(['日期'], '日')    or cols[0]
+        foreign_col = _find(['外資','淨'], '外資')
+        trust_col   = _find(['投信','淨'], '投信')
+        dealer_col  = _find(['自營','淨'], '自營')
+
+        if not all([foreign_col, trust_col, dealer_col]):
+            return {'error': f'欄位識別失敗，實際欄位：{cols}'}
+
+        def _n(s):
+            try: return float(str(s).replace(',','').replace('--','0').strip() or 0)
+            except: return 0.0
+
+        target_df[date_col] = pd.to_datetime(target_df[date_col], errors='coerce')
+        target_df = target_df.dropna(subset=[date_col]).set_index(date_col).sort_index()
+
+        df_inst = pd.DataFrame({
+            '外資':   target_df[foreign_col].apply(_n),
+            '投信':   target_df[trust_col].apply(_n),
+            '自營商': target_df[dealer_col].apply(_n),
+        }).tail(30)
+        df_inst['合計'] = df_inst['外資'] + df_inst['投信'] + df_inst['自營商']
+
         r10 = df_inst.tail(10)
-        summary = {
-            col: {
-                'total':  int(r10[col].sum()),
-                'consec': 0,
-            }
-            for col in ['外資', '投信', '自營商', '合計']
-        }
+        summary = {}
         for col in ['外資', '投信', '自營商', '合計']:
-            vals = df_inst[col].iloc[::-1].tolist()   # 最新在前
+            vals = df_inst[col].iloc[::-1].tolist()
             cnt = 0
             for v in vals:
                 if v > 0: cnt += 1
                 else: break
-            summary[col]['consec'] = cnt
+            summary[col] = {'total': round(r10[col].sum(), 1), 'consec': cnt}
 
-        return {'df': df_inst, 'summary': summary}
+        return {'df': df_inst, 'summary': summary, 'source': 'goodinfo'}
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': f'goodinfo 三大法人：{e}'}
 
 
 # ─────────────────────────────────────────────
 # 融資融券餘額（FinMind）
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=1800)
-def fetch_margin(ticker):
+def fetch_margin():
+    """大盤融資融券 — goodinfo.tw（bs4+html.parser，無需 lxml/html5lib）
+    使用加權指數的信用交易頁面
     """
-    融資融券近 60 日餘額
-    dataset: TaiwanStockMarginPurchaseShortSale
-    """
-    if not ticker.endswith('.TW'):
-        return None
-    stock_code = ticker.replace('.TW', '')
-    start_date = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+    headers = {
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer':         'https://goodinfo.tw/tw/index.asp',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en;q=0.8',
+    }
+    # goodinfo 加權指數信用交易（融資融券）正確 URL
+    candidates = [
+        'https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=CREDIT',
+        'https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=CREDIT_DAILY',
+        'https://goodinfo.tw/tw/ShowBuySaleChart.asp?STOCK_ID=%E5%8A%A0%E6%AC%8A%E6%8C%87%E6%95%B8&CHT_CAT=MARGIN',
+    ]
     try:
-        url = (
-            'https://api.finmindtrade.com/api/v4/data'
-            f'?dataset=TaiwanStockMarginPurchaseShortSale'
-            f'&data_id={stock_code}&start_date={start_date}'
-        )
-        r = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
-        if r.status_code != 200 or r.json().get('status') != 200:
-            return {'error': f'HTTP {r.status_code}'}
-        rows = r.json().get('data', [])
-        if not rows:
-            return {'error': '無資料'}
+        from bs4 import BeautifulSoup
+        sess = requests.Session()
+        sess.get('https://goodinfo.tw/tw/index.asp', timeout=10, headers=headers)
 
-        df_m = pd.DataFrame(rows)
-        df_m['date'] = pd.to_datetime(df_m['date'])
-        df_m = df_m.set_index('date').sort_index()
+        debug_cols = []
+        for url in candidates:
+            r = sess.get(url, timeout=15, headers=headers)
+            if r.status_code != 200:
+                continue
+            r.encoding = 'utf-8'
+            soup = BeautifulSoup(r.text, 'html.parser')
 
-        # 欄位：MarginPurchaseBuy, MarginPurchaseSell, MarginPurchaseRedeem,
-        #        MarginPurchaseTodayBalance, ShortSaleBuy, ShortSaleSell,
-        #        ShortSaleTodayBalance 等
-        num_cols = ['MarginPurchaseTodayBalance', 'ShortSaleTodayBalance',
-                    'MarginPurchaseBuy', 'MarginPurchaseSell',
-                    'ShortSaleBuy', 'ShortSaleSell']
-        for c in num_cols:
-            if c in df_m.columns:
-                df_m[c] = pd.to_numeric(df_m[c], errors='coerce')
+            for tbl in soup.find_all('table'):
+                text = tbl.get_text()
+                if '融資' not in text and '信用' not in text:
+                    continue
+                rows = tbl.find_all('tr')
+                if len(rows) < 5:
+                    continue
+                data = [[c.get_text(strip=True) for c in tr.find_all(['th','td'])]
+                        for tr in rows]
+                max_c = max(len(r) for r in data)
+                data  = [r + ['']*(max_c-len(r)) for r in data]
+                header_idx = next(
+                    (i for i, row in enumerate(data)
+                     if any('融資' in c or '融券' in c for c in row)), 0)
+                header_row = data[header_idx]
+                body = data[header_idx+1:]
+                df_raw = pd.DataFrame(body, columns=header_row)
+                cols = list(df_raw.columns)
+                debug_cols.append(cols)
 
-        df_m = df_m[[c for c in num_cols if c in df_m.columns]].dropna(how='all')
+                mb_col = next((c for c in cols if '融資' in c and
+                               any(k in c for k in ['餘額','餘','Balance'])), None)
+                sb_col = next((c for c in cols if '融券' in c and
+                               any(k in c for k in ['餘額','餘','Balance'])), None)
 
-        last = df_m.iloc[-1] if not df_m.empty else pd.Series()
-        prev = df_m.iloc[-2] if len(df_m) >= 2 else pd.Series()
+                if not mb_col or not sb_col:
+                    continue
 
-        # 融資餘額趨勢（5日變化）
-        margin_bal  = df_m['MarginPurchaseTodayBalance'] if 'MarginPurchaseTodayBalance' in df_m else pd.Series()
-        short_bal   = df_m['ShortSaleTodayBalance']      if 'ShortSaleTodayBalance'      in df_m else pd.Series()
-        margin_chg  = int(margin_bal.iloc[-1] - margin_bal.iloc[-5]) if len(margin_bal) >= 5 else 0
-        short_chg   = int(short_bal.iloc[-1]  - short_bal.iloc[-5])  if len(short_bal)  >= 5 else 0
+                def _n(s):
+                    try: return float(str(s).replace(',','').replace('--','0').strip() or 0)
+                    except: return 0.0
 
-        # 融券覆蓋率 = 融券/融資（比值高 → 空方佔優）
-        cover_ratio = (float(short_bal.iloc[-1]) / float(margin_bal.iloc[-1])
-                       if (len(margin_bal) > 0 and float(margin_bal.iloc[-1]) > 0) else 0)
+                date_col = cols[0]
+                df_raw[date_col] = pd.to_datetime(df_raw[date_col], errors='coerce')
+                df_raw = df_raw.dropna(subset=[date_col]).set_index(date_col).sort_index()
 
-        return {
-            'df':          df_m,
-            'margin_bal':  margin_bal,
-            'short_bal':   short_bal,
-            'margin_chg':  margin_chg,
-            'short_chg':   short_chg,
-            'cover_ratio': cover_ratio,
-        }
+                mb = df_raw[mb_col].apply(_n)
+                sb = df_raw[sb_col].apply(_n)
+                mb = mb[mb > 0].tail(60)
+                sb = sb.reindex(mb.index).fillna(0)
+
+                margin_chg = int(mb.iloc[-1] - mb.iloc[-5]) if len(mb) >= 5 else 0
+                short_chg  = int(sb.iloc[-1] - sb.iloc[-5]) if len(sb) >= 5 else 0
+                mb_max = float(mb.max()) if len(mb) > 0 else 1
+                heat   = float(mb.iloc[-1]) / mb_max if mb_max > 0 else 0
+
+                return {
+                    'df':          pd.DataFrame({'margin_bal': mb, 'short_bal': sb}),
+                    'margin_bal':  mb,
+                    'short_bal':   sb,
+                    'margin_chg':  margin_chg,
+                    'short_chg':   short_chg,
+                    'cover_ratio': heat,
+                    'source':      'goodinfo',
+                }
+
+        return {'error': f'goodinfo 融資融券：找不到融資/融券餘額欄，抓到欄位：{debug_cols[:3]}'}
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': f'goodinfo 融資融券：{e}'}
 
 
 # ─────────────────────────────────────────────
@@ -423,7 +462,7 @@ def fetch_futures_oi():
 
         # 自動偵測法人名稱欄位
         name_col = next(
-            (c for c in ['name', 'Name', 'identity_type', 'InstitutionalInvestors']
+            (c for c in ['institutional_investors', 'name', 'Name', 'identity_type', 'InstitutionalInvestors']
              if c in df_f.columns),
             None
         )
@@ -431,8 +470,8 @@ def fetch_futures_oi():
             return {'error': f'找不到法人名稱欄位，實際欄位：{list(df_f.columns)}'}
 
         # 多口/空口欄位名（FinMind 版本差異）
-        long_col  = next((c for c in ['long_open_interest_balance',  'LongOpenInterestBalance',  'long_balance']  if c in df_f.columns), None)
-        short_col = next((c for c in ['short_open_interest_balance', 'ShortOpenInterestBalance', 'short_balance'] if c in df_f.columns), None)
+        long_col  = next((c for c in ['long_open_interest_balance_volume', 'long_open_interest_balance', 'LongOpenInterestBalance', 'long_balance'] if c in df_f.columns), None)
+        short_col = next((c for c in ['short_open_interest_balance_volume', 'short_open_interest_balance', 'ShortOpenInterestBalance', 'short_balance'] if c in df_f.columns), None)
         if long_col is None or short_col is None:
             return {'error': f'找不到多空倉位欄位，實際欄位：{list(df_f.columns)}'}
 
@@ -449,8 +488,14 @@ def fetch_futures_oi():
         from collections import defaultdict
         daily_net = defaultdict(lambda: defaultdict(int))
         for _, row in df_f.iterrows():
-            grp = GROUP.get(str(row.get(name_col, '')))
-            if grp is None:
+            raw_name = str(row.get(name_col, '')).strip()
+            if '外資' in raw_name or 'Foreign' in raw_name:
+                grp = '外資'
+            elif '投信' in raw_name or 'Investment_Trust' in raw_name:
+                grp = '投信'
+            elif '自營' in raw_name or 'Dealer' in raw_name:
+                grp = '自營商'
+            else:
                 continue
             net = int(row.get(long_col, 0) or 0) - int(row.get(short_col, 0) or 0)
             daily_net[row[date_col]][grp] += net
@@ -1280,14 +1325,10 @@ if run_clicked:
     with st.spinner('📊 抓取本益比歷史資料（FinMind）...'):
         st.session_state.per_data = fetch_per_river(ticker) if ticker.endswith('.TW') else None
 
-    with st.spinner('📊 抓取三大法人、融資融券、期貨法人資料...'):
-        if ticker.endswith('.TW'):
-            st.session_state.three_inst  = fetch_three_institutions(ticker)
-            st.session_state.margin      = fetch_margin(ticker)
-        else:
-            st.session_state.three_inst  = None
-            st.session_state.margin      = None
-        st.session_state.futures_oi = fetch_futures_oi()
+    with st.spinner('📊 抓取大盤三大法人、融資融券、期貨法人資料...'):
+        st.session_state.three_inst  = fetch_three_institutions()
+        st.session_state.margin      = fetch_margin()
+        st.session_state.futures_oi  = fetch_futures_oi()
 
 elif st.session_state.df is None:
     st.info("👈 請在左側設定股票代碼與週期，再按「執行分析」開始")
@@ -1417,7 +1458,7 @@ elif not ticker.endswith('.TW'):
 st.markdown("---")
 st.subheader("🏦 籌碼面綜合分析")
 
-tab1, tab2, tab3 = st.tabs(["📋 三大法人 30日買賣超", "💳 融資融券餘額", "📉 台指期貨法人未平倉"])
+tab1, tab2, tab3 = st.tabs(["📋 大盤三大法人買賣超", "💳 大盤整體融資融券", "📉 台指期貨法人未平倉"])
 
 # ── Tab1：三大法人 ──────────────────────────────────────────────────
 with tab1:
@@ -1494,8 +1535,6 @@ with tab1:
             )
     elif three_inst and 'error' in three_inst:
         st.caption(f"三大法人資料無法取得：{three_inst['error']}")
-    else:
-        st.caption("三大法人資料僅支援台股（代碼需以 .TW 結尾）")
 
 # ── Tab2：融資融券 ──────────────────────────────────────────────────
 with tab2:
@@ -1570,8 +1609,6 @@ with tab2:
 
     elif margin_data and 'error' in margin_data:
         st.caption(f"融資融券資料無法取得：{margin_data['error']}")
-    else:
-        st.caption("融資融券資料僅支援台股（代碼需以 .TW 結尾）")
 
 # ── Tab3：台指期貨法人未平倉 ────────────────────────────────────────
 with tab3:
