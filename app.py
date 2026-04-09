@@ -20,7 +20,7 @@ warnings.filterwarnings('ignore')
 # ─────────────────────────────────────────────
 st.set_page_config(
     page_title="台股技術分析儀表板 v2",
-    page_icon="📈",
+    page_icon="??",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -77,7 +77,7 @@ INTERVAL_CONFIG = {
 # 側邊欄
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.title("⚙️ 分析設定")
+    st.title("?? 分析設定")
 
     ticker_input = st.text_input(
         "股票代碼",
@@ -149,7 +149,7 @@ def fetch_market_env(interval):
 
 def _parse_twse_net(raw: str) -> int:
     """將 TWSE 回傳數字字串轉整數（處理全形負號、千分位逗號）"""
-    s = raw.replace(',', '').replace('−', '-').replace('－', '-').strip()
+    s = raw.replace(',', '').replace('?', '-').replace('－', '-').strip()
     try:
         return int(s) if s and s not in ('--', '') else 0
     except ValueError:
@@ -423,10 +423,10 @@ def fetch_futures_oi():
         from collections import defaultdict
         daily_net = defaultdict(lambda: defaultdict(int))
         for _, row in df_f.iterrows():
-            grp = GROUP.get(row.get('name', ''))
+            grp = GROUP.get(row.get('institutional_investors', ''))
             if grp is None:
                 continue
-            net = int(row.get('long_open_interest_balance', 0) or 0)                 - int(row.get('short_open_interest_balance', 0) or 0)
+            net = int(row.get('long_open_interest_balance_volume', 0) or 0)                 - int(row.get('short_open_interest_balance_volume', 0) or 0)
             daily_net[row['date']][grp] += net
 
         dates = sorted(daily_net.keys())
@@ -897,7 +897,7 @@ def build_chart(df, cfg, interval_label, rsi_low, use_trend_filter):
         if not strong_bearish.empty:
             fig.add_trace(go.Scatter(
                 x=strong_bearish.index, y=strong_bearish['Low'] * 0.974, mode='markers',
-                name='訊號⚠️（空頭濾除）',
+                name='訊號??（空頭濾除）',
                 marker=dict(symbol='triangle-up', size=11,
                             color='rgba(160,160,160,0.45)',
                             line=dict(color='white', width=1)),
@@ -980,23 +980,23 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
     trend_bearish = bool(last['trend_bearish'])
 
     st.markdown("---")
-    st.subheader("🔍 升級版四維技術分析（10分制）")
+    st.subheader("?? 升級版四維技術分析（10分制）")
 
     # ── 整體研判 ──────────────────────────────────
     effective = score - (2 if trend_bearish and use_trend_filter else 0)
     if effective >= score_th:
-        icon, label = "🟢", "偏多（低點訊號明顯）"
+        icon, label = "??", "偏多（低點訊號明顯）"
         desc = f"訊號評分 **{score}/10**，多項指標共振。"
         if trend_bearish and use_trend_filter:
-            desc += " ⚠️ **趨勢偏弱，訊號可靠度下降，建議輕倉試探或等待趨勢確認。**"
+            desc += " ?? **趨勢偏弱，訊號可靠度下降，建議輕倉試探或等待趨勢確認。**"
     elif effective >= score_th - 2:
-        icon, label = "🟡", "中性偏多（弱訊號）"
+        icon, label = "??", "中性偏多（弱訊號）"
         desc = f"訊號評分 **{score}/10**，訊號強度中等，建議等待更多確認後操作。"
     elif last['RSI'] > 65 or last['K'] > 75:
-        icon, label = "🔴", "偏空（指標偏高）"
+        icon, label = "??", "偏空（指標偏高）"
         desc = f"評分 **{score}/10**，多項指標處於高檔，留意回調風險。"
     else:
-        icon, label = "⚪", "中性（無明顯訊號）"
+        icon, label = "?", "中性（無明顯訊號）"
         desc = f"評分 **{score}/10**，各指標中性，建議觀望。"
 
     st.markdown(f"### {icon} 整體研判：{label}")
@@ -1008,7 +1008,7 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
     s_score = int(last['cond_s1']) + int(last['cond_s2']) + int(last['cond_s3'])
     v_score = int(last['cond_v1']) + int(last['cond_tr'])
 
-    def s_icon(s, mx): return "🟢" if s == mx else ("🟡" if s > 0 else "🔴")
+    def s_icon(s, mx): return "??" if s == mx else ("??" if s > 0 else "??")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1: st.metric(f"{s_icon(t_score,2)} 趨勢",  f"{t_score} / 2",  "年線+斜率")
@@ -1023,15 +1023,15 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
 
     with col_a:
         # 趨勢
-        st.markdown("**📈 趨勢濾網（避免空頭撿便宜）**")
+        st.markdown("**?? 趨勢濾網（避免空頭撿便宜）**")
         ma_annual_col   = f'MA{ma_periods[-1]}'
         ma_short_col    = f'MA{ma_periods[0]}'
         annual_label    = cfg['ma_labels'][-1].split('(')[0]
         short_label     = cfg['ma_labels'][0].split('(')[0]
         slope_v         = last['MA_slope']
 
-        t1v = ("🟢" if last['cond_t1'] else "🔴")
-        t2v = ("🟢" if last['cond_t2'] else "🔴")
+        t1v = ("??" if last['cond_t1'] else "??")
+        t2v = ("??" if last['cond_t2'] else "??")
         st.markdown(
             f"- {t1v} 收盤（{last['Close']:.1f}）"
             f"{'>' if last['cond_t1'] else '<'} {annual_label}（{last[ma_annual_col]:.1f}）"
@@ -1042,29 +1042,29 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
             f"，{'向上（趨勢上升）' if last['cond_t2'] else '向下（趨勢下降）'}"
         )
         if trend_bearish and use_trend_filter:
-            st.warning("⚠️ 兩項趨勢條件皆未通過，屬空頭環境，訊號勝率大幅下降")
+            st.warning("?? 兩項趨勢條件皆未通過，屬空頭環境，訊號勝率大幅下降")
 
         # 動能
-        st.markdown("**📊 動能指標（Momentum）**")
+        st.markdown("**?? 動能指標（Momentum）**")
         rsi_v = last['RSI']
         k_v, d_v = last['K'], last['D']
         h_now, h_prev = last['MACD_hist'], prev['MACD_hist']
 
-        rsi_txt = (f"🟢 超賣（{rsi_v:.1f}），反彈機率上升" if rsi_v < rsi_low else
-                   f"🔴 超買（{rsi_v:.1f}），留意回調" if rsi_v > 70 else
-                   f"🟡 中性（{rsi_v:.1f}）")
-        kd_txt = (f"🟢 KD超賣（K:{k_v:.1f} D:{d_v:.1f}）" if k_v < 25 else
-                  f"🔴 KD超買（K:{k_v:.1f}）" if k_v > 75 else
-                  f"🟡 KD中性（K:{k_v:.1f} D:{d_v:.1f}）")
+        rsi_txt = (f"?? 超賣（{rsi_v:.1f}），反彈機率上升" if rsi_v < rsi_low else
+                   f"?? 超買（{rsi_v:.1f}），留意回調" if rsi_v > 70 else
+                   f"?? 中性（{rsi_v:.1f}）")
+        kd_txt = (f"?? KD超賣（K:{k_v:.1f} D:{d_v:.1f}）" if k_v < 25 else
+                  f"?? KD超買（K:{k_v:.1f}）" if k_v > 75 else
+                  f"?? KD中性（K:{k_v:.1f} D:{d_v:.1f}）")
 
         if last['cond_m3']:
-            macd_txt = f"🟢 MACD柱縮短（{h_prev:.2f}→{h_now:.2f}），即將翻正，提前卡位"
+            macd_txt = f"?? MACD柱縮短（{h_prev:.2f}→{h_now:.2f}），即將翻正，提前卡位"
         elif h_now > 0 and h_prev <= 0:
-            macd_txt = f"🟡 MACD柱{bar_unit}翻正（{h_now:.2f}），動能反轉（但可能稍晚）"
+            macd_txt = f"?? MACD柱{bar_unit}翻正（{h_now:.2f}），動能反轉（但可能稍晚）"
         elif h_now > 0:
-            macd_txt = f"🟡 MACD柱持續為正（{h_now:.2f}），多頭延續"
+            macd_txt = f"?? MACD柱持續為正（{h_now:.2f}），多頭延續"
         else:
-            macd_txt = f"🔴 MACD柱為負（{h_now:.2f}），尚未縮短"
+            macd_txt = f"?? MACD柱為負（{h_now:.2f}），尚未縮短"
 
         st.markdown(f"- **RSI(14)**：{rsi_txt}")
         st.markdown(f"- **KD(9,3,3)**：{kd_txt}")
@@ -1072,44 +1072,44 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
 
     with col_b:
         # 結構
-        st.markdown("**📐 結構指標（Price Structure）**")
+        st.markdown("**?? 結構指標（Price Structure）**")
         bb_pct   = last['BB_pct'] * 100
         support  = last['Support']
         dist_pct = abs(last['Close'] - support) / support * 100
 
-        s1_txt = (f"🟢 接近布林下軌（%B:{bb_pct:.1f}%，下軌{last['BB_lower']:.1f}）" if last['cond_s1'] else
-                  f"🔴 接近布林上軌（%B:{bb_pct:.1f}%）" if bb_pct > 80 else
-                  f"🟡 布林中段（%B:{bb_pct:.1f}%）")
-        s2_txt = (f"🟢 接近前{cfg['support_periods']}期低點支撐（距低點{dist_pct:.1f}%，支撐位{support:.1f}）"
+        s1_txt = (f"?? 接近布林下軌（%B:{bb_pct:.1f}%，下軌{last['BB_lower']:.1f}）" if last['cond_s1'] else
+                  f"?? 接近布林上軌（%B:{bb_pct:.1f}%）" if bb_pct > 80 else
+                  f"?? 布林中段（%B:{bb_pct:.1f}%）")
+        s2_txt = (f"?? 接近前{cfg['support_periods']}期低點支撐（距低點{dist_pct:.1f}%，支撐位{support:.1f}）"
                   if last['cond_s2'] else
-                  f"🟡 距支撐 {dist_pct:.1f}%（支撐位{support:.1f}），尚未到達")
+                  f"?? 距支撐 {dist_pct:.1f}%（支撐位{support:.1f}），尚未到達")
         kd_cross = bool(last['K'] > last['D'] and prev['K'] <= prev['D'])
-        s3_txt = (f"🟢 {bar_unit}KD黃金交叉（K:{k_v:.1f} D:{d_v:.1f}），動能反轉" if kd_cross else
-                  f"🟡 K>D尚未交叉（K:{last['K']:.1f} D:{last['D']:.1f}）" if last['K'] > last['D'] else
-                  f"🔴 KD死亡排列（K:{last['K']:.1f} < D:{last['D']:.1f}）")
+        s3_txt = (f"?? {bar_unit}KD黃金交叉（K:{k_v:.1f} D:{d_v:.1f}），動能反轉" if kd_cross else
+                  f"?? K>D尚未交叉（K:{last['K']:.1f} D:{last['D']:.1f}）" if last['K'] > last['D'] else
+                  f"?? KD死亡排列（K:{last['K']:.1f} < D:{last['D']:.1f}）")
 
         st.markdown(f"- **布林通道**：{s1_txt}")
         st.markdown(f"- **結構支撐**：{s2_txt}")
         st.markdown(f"- **KD交叉**：{s3_txt}")
 
         # 量能 + 觸發
-        st.markdown("**🔊 量能 + 進場觸發（Volume & Trigger）**")
+        st.markdown("**?? 量能 + 進場觸發（Volume & Trigger）**")
         vol_ratio = last['Volume'] / last[vol_ma_col] if last[vol_ma_col] > 0 else 1
-        v1_txt = (f"🟢 下跌量縮後放量（{bar_unit}量為均量{vol_ratio*100:.0f}%），賣壓減弱+買盤進場"
+        v1_txt = (f"?? 下跌量縮後放量（{bar_unit}量為均量{vol_ratio*100:.0f}%），賣壓減弱+買盤進場"
                   if last['cond_v1'] else
-                  f"🔴 量能雙條件未達（{bar_unit}量為均量{vol_ratio*100:.0f}%），需觀察")
-        tr_txt = (f"🟢 突破前期高點（{prev['High']:.1f}）或站上MA{trigger_n}（{last[f'MA{trigger_n}']:.1f}），觸發進場"
+                  f"?? 量能雙條件未達（{bar_unit}量為均量{vol_ratio*100:.0f}%），需觀察")
+        tr_txt = (f"?? 突破前期高點（{prev['High']:.1f}）或站上MA{trigger_n}（{last[f'MA{trigger_n}']:.1f}），觸發進場"
                   if last['cond_tr'] else
-                  f"🔴 尚未突破前高（{prev['High']:.1f}）或MA{trigger_n}（{last[f'MA{trigger_n}']:.1f}），可等待")
+                  f"?? 尚未突破前高（{prev['High']:.1f}）或MA{trigger_n}（{last[f'MA{trigger_n}']:.1f}），可等待")
 
         st.markdown(f"- **量能**：{v1_txt}")
         st.markdown(f"- **進場觸發**：{tr_txt}")
 
     # ── 市場環境 ───────────────────────────────────
     st.markdown("---")
-    st.markdown("**🌍 市場環境濾網（大盤 0050.TW）**")
+    st.markdown("**?? 市場環境濾網（大盤 0050.TW）**")
     if market_env:
-        env_icon = "🟢" if market_env['bullish'] else "🔴"
+        env_icon = "??" if market_env['bullish'] else "??"
         at = "站上年線" if market_env['above_annual'] else "跌破年線"
         rsi_e = market_env['rsi']
         env_msg = "多頭環境，順勢操作有利" if market_env['bullish'] else "空頭環境，逆勢操作勝率偏低，建議謹慎"
@@ -1119,40 +1119,40 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
 
     # ── 外資籌碼 ───────────────────────────────────
     if ticker.endswith('.TW'):
-        st.markdown("**🏦 外資籌碼（近5日，TWSE）**")
+        st.markdown("**?? 外資籌碼（近5日，TWSE）**")
         if institutional and isinstance(institutional, dict) and 'error' not in institutional:
             consec = institutional['consecutive_buy']
             total  = institutional['total_net_5d']
             latest = institutional['latest_net']
             if institutional['bullish']:
                 st.markdown(
-                    f"🟢 外資連續 **{consec} 日**買超，近5日合計 {total:+,} 張，"
+                    f"?? 外資連續 **{consec} 日**買超，近5日合計 {total:+,} 張，"
                     f"低檔回補訊號（主力入場）"
                 )
             elif consec == 0:
                 st.markdown(
-                    f"🔴 外資近期持續賣超，最新日 {latest:+,} 張，籌碼面偏空"
+                    f"?? 外資近期持續賣超，最新日 {latest:+,} 張，籌碼面偏空"
                 )
             else:
                 st.markdown(
-                    f"🟡 外資買超 {consec} 日（未達連3日門檻），持續觀察是否延續"
+                    f"?? 外資買超 {consec} 日（未達連3日門檻），持續觀察是否延續"
                 )
 
             recs = institutional.get('records', [])
             if recs:
                 inst_df = pd.DataFrame(recs)
                 inst_df['方向'] = inst_df['foreign_net'].map(
-                    lambda x: '🔺 買超' if x > 0 else '🔻 賣超'
+                    lambda x: '?? 買超' if x > 0 else '?? 賣超'
                 )
                 inst_df['買賣超（張）'] = inst_df['foreign_net'].map(lambda x: f"{x:+,}")
                 inst_df = inst_df[['date','方向','買賣超（張）']].rename(columns={'date':'日期'})
                 st.dataframe(inst_df, width='stretch', hide_index=True)
         else:
             err_msg = institutional.get('error', '未知錯誤') if isinstance(institutional, dict) else '回傳格式異常'
-            st.warning(f"⚠️ 外資資料無法取得｜{err_msg}")
+            st.warning(f"?? 外資資料無法取得｜{err_msg}")
 
     # ── 完整明細（可展開）────────────────────────────
-    with st.expander("📋 10項評分條件完整明細"):
+    with st.expander("?? 10項評分條件完整明細"):
         annual_lbl = cfg['ma_labels'][-1].split('(')[0]
         short_lbl  = cfg['ma_labels'][0].split('(')[0]
         sup_n      = cfg['support_periods']
@@ -1191,7 +1191,7 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
         ]
 
         for name, passed, detail in cond_list:
-            st.markdown(f"{'✅' if passed else '❌'} **{name}**　*（{detail}）*")
+            st.markdown(f"{'?' if passed else '?'} **{name}**　*（{detail}）*")
 
         verdict = ("→ 強低點訊號" if score >= score_th else
                    "→ 觀察訊號"   if score >= score_th - 2 else
@@ -1200,7 +1200,7 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
         if trend_bearish and use_trend_filter:
             st.warning("趨勢偏弱（年線下方+季線下彎），建議降低倉位或等趨勢確認後再行動")
 
-    st.markdown("> ⚠️ **免責聲明**：以上分析純為技術面參考，不構成任何投資建議。股市有風險，投資需謹慎。")
+    st.markdown("> ?? **免責聲明**：以上分析純為技術面參考，不構成任何投資建議。股市有風險，投資需謹慎。")
 
 
 # ─────────────────────────────────────────────
@@ -1209,10 +1209,10 @@ def render_analysis(df, cfg, interval_label, ticker, rsi_low, score_th,
 period     = cfg['period_map'].get(years, '3y')
 vol_ma_col = f'Vol_MA{cfg["vol_ma"]}'
 
-st.title(f"📈 {ticker}　{interval_label} 技術分析儀表板 v2")
+st.title(f"?? {ticker}　{interval_label} 技術分析儀表板 v2")
 
 # ── 手動執行按鈕（側邊欄底部已設定，主畫面也放一顆）─────────
-run_clicked = st.button("🔍 執行分析", type="primary", help="設定好參數後點此開始分析")
+run_clicked = st.button("?? 執行分析", type="primary", help="設定好參數後點此開始分析")
 
 # 用 session_state 記住「已執行過」，切換週期/代碼時需重新按
 if 'last_query' not in st.session_state:
@@ -1234,7 +1234,7 @@ if run_clicked:
     fetch_market_env.clear()
     fetch_institutional.clear()
 
-    with st.spinner("📡 正在抓取股價資料..."):
+    with st.spinner("?? 正在抓取股價資料..."):
         try:
             df = fetch_data(ticker, cfg['interval'], period)
             if df.empty:
@@ -1247,14 +1247,14 @@ if run_clicked:
             st.error(f"資料抓取失敗：{e}")
             st.stop()
 
-    with st.spinner("📡 抓取大盤環境與外資資料（FinMind）..."):
+    with st.spinner("?? 抓取大盤環境與外資資料（FinMind）..."):
         st.session_state.market_env    = fetch_market_env(cfg['interval'])
         st.session_state.institutional = fetch_institutional(ticker) if ticker.endswith('.TW') else None
 
-    with st.spinner('📊 抓取本益比歷史資料（FinMind）...'):
+    with st.spinner('?? 抓取本益比歷史資料（FinMind）...'):
         st.session_state.per_data = fetch_per_river(ticker) if ticker.endswith('.TW') else None
 
-    with st.spinner('📊 抓取三大法人、融資融券、期貨法人資料...'):
+    with st.spinner('?? 抓取三大法人、融資融券、期貨法人資料...'):
         if ticker.endswith('.TW'):
             st.session_state.three_inst  = fetch_three_institutions(ticker)
             st.session_state.margin      = fetch_margin(ticker)
@@ -1264,12 +1264,12 @@ if run_clicked:
         st.session_state.futures_oi = fetch_futures_oi()
 
 elif st.session_state.df is None:
-    st.info("👈 請在左側設定股票代碼與週期，再按「執行分析」開始")
+    st.info("?? 請在左側設定股票代碼與週期，再按「執行分析」開始")
     st.stop()
 elif st.session_state.last_query != query_key:
     # 設定已變更（如切換週期），舊 df 的欄位不符，必須重新執行
     st.warning(
-        f"⚙️ 設定已變更（{st.session_state.last_query} → {query_key}），"
+        f"?? 設定已變更（{st.session_state.last_query} → {query_key}），"
         "請按「執行分析」重新載入資料。"
     )
     st.stop()
@@ -1300,17 +1300,17 @@ with c3:
               "超賣" if last['K'] < 25 else ("超買" if last['K'] > 75 else ""))
 with c4:
     st.metric("趨勢濾網",
-              "✅ 多頭" if trend_ok else "⚠️ 空頭", "")
+              "? 多頭" if trend_ok else "?? 空頭", "")
 with c5:
     st.metric("大盤環境",
-              "✅ 有利" if market_ok else ("⚠️ 不利" if market_env else "—"), "")
+              "? 有利" if market_ok else ("?? 不利" if market_env else "—"), "")
 with c6:
     st.metric("訊號評分", f"{score_now} / 10",
               "★ 強訊號" if last['signal_strong'] else ("△ 觀察" if last['signal_medium'] else ""))
 with c7:
     if per_data and 'stats' in per_data:
         ps = per_data['stats']
-        zone_map = {'cheap':'🟢 低估','fair_low':'🟡 合理偏低','fair_high':'🟡 合理偏高','expensive':'🔴 高估','unknown':'—'}
+        zone_map = {'cheap':'?? 低估','fair_low':'?? 合理偏低','fair_high':'?? 合理偏高','expensive':'?? 高估','unknown':'—'}
         st.metric("本益比 PER", f"{ps['current_per']:.1f}x" if not np.isnan(ps['current_per']) else "—",
                   zone_map.get(ps['zone'],'—'))
     else:
@@ -1323,28 +1323,28 @@ st.plotly_chart(fig, width='stretch')
 # ── 近期訊號表 ─────────────────────────────────
 strong_signals = df[df['signal_strong']].tail(5)
 if not strong_signals.empty:
-    st.subheader(f"📍 近期強低點訊號（{interval_label}）")
+    st.subheader(f"?? 近期強低點訊號（{interval_label}）")
     disp = strong_signals[['Close','RSI','K','D','BB_pct','signal_score','trend_bearish']].copy()
     disp.index = disp.index.strftime(cfg['date_fmt'])
     disp.columns = ['收盤價','RSI','K值','D值','BB%B','評分(/10)','趨勢偏弱']
     disp['BB%B']    = (disp['BB%B'] * 100).round(1)
-    disp['趨勢偏弱'] = disp['趨勢偏弱'].map({True: '⚠️ 是', False: '✅ 否'})
+    disp['趨勢偏弱'] = disp['趨勢偏弱'].map({True: '?? 是', False: '? 否'})
     st.dataframe(disp.style.format({
         '收盤價':'{:.1f}', 'RSI':'{:.1f}', 'K值':'{:.1f}',
         'D值':'{:.1f}', 'BB%B':'{:.1f}%', '評分(/10)':'{:.0f}'
     }), width='stretch')
 
 st.caption(
-    f"⏱ 資料更新：{df.index[-1].strftime(cfg['date_fmt'])}  |  "
-    f"週期：{interval_label}  |  ⚠️ 僅供技術分析參考"
+    f"? 資料更新：{df.index[-1].strftime(cfg['date_fmt'])}  |  "
+    f"週期：{interval_label}  |  ?? 僅供技術分析參考"
 )
 
 # ── 本益比河流圖 ───────────────────────────────
 st.markdown("---")
-st.subheader("📊 本益比河流圖（PER River Chart）")
+st.subheader("?? 本益比河流圖（PER River Chart）")
 if per_data and 'stats' in per_data:
     ps = per_data['stats']
-    zone_label = {'cheap':'🟢 歷史低估區','fair_low':'🟡 合理偏低','fair_high':'🟡 合理偏高','expensive':'🔴 歷史高估區','unknown':'—'}
+    zone_label = {'cheap':'?? 歷史低估區','fair_low':'?? 合理偏低','fair_high':'?? 合理偏高','expensive':'?? 歷史高估區','unknown':'—'}
     zone_color = {'cheap':'success','fair_low':'info','fair_high':'warning','expensive':'error','unknown':'info'}
 
     pa, pb, pc, pd_ = st.columns(4)
@@ -1389,9 +1389,9 @@ elif not ticker.endswith('.TW'):
 # 籌碼面綜合分析（三大法人 / 融資融券 / 期貨法人）
 # ══════════════════════════════════════════════
 st.markdown("---")
-st.subheader("🏦 籌碼面綜合分析")
+st.subheader("?? 籌碼面綜合分析")
 
-tab1, tab2, tab3 = st.tabs(["📋 三大法人 30日買賣超", "💳 融資融券餘額", "📉 台指期貨法人未平倉"])
+tab1, tab2, tab3 = st.tabs(["?? 三大法人 30日買賣超", "?? 融資融券餘額", "?? 台指期貨法人未平倉"])
 
 # ── Tab1：三大法人 ──────────────────────────────────────────────────
 with tab1:
@@ -1443,20 +1443,20 @@ with tab1:
         total_10   = ti_sum['合計']['total']
 
         if foreign_10 > 0 and trust_10 > 0:
-            st.success(f"🟢 外資與投信**同步買超**（外資近10日 {foreign_10:+,}張，投信 {trust_10:+,}張），"
+            st.success(f"?? 外資與投信**同步買超**（外資近10日 {foreign_10:+,}張，投信 {trust_10:+,}張），"
                        f"籌碼面多頭訊號強烈，尤其外資連 {f_consec} 日買超，可信度較高。")
         elif foreign_10 > 0 and trust_10 <= 0:
-            st.info(f"🟡 外資買超（{foreign_10:+,}張）但投信賣超（{trust_10:+,}張），"
+            st.info(f"?? 外資買超（{foreign_10:+,}張）但投信賣超（{trust_10:+,}張），"
                     f"法人看法分歧，建議觀察外資是否持續。")
         elif foreign_10 <= 0 and trust_10 > 0:
-            st.info(f"🟡 投信買超（{trust_10:+,}張）但外資賣超（{foreign_10:+,}張），"
+            st.info(f"?? 投信買超（{trust_10:+,}張）但外資賣超（{foreign_10:+,}張），"
                     f"投信資金規模較小，整體籌碼仍偏弱。")
         else:
-            st.warning(f"🔴 外資（{foreign_10:+,}張）與投信（{trust_10:+,}張）**同步賣超**，"
+            st.warning(f"?? 外資（{foreign_10:+,}張）與投信（{trust_10:+,}張）**同步賣超**，"
                        f"法人持續出脫，籌碼面偏空。")
 
         # 明細表（最近10日）
-        with st.expander("📋 近30日明細"):
+        with st.expander("?? 近30日明細"):
             disp_ti = ti_df.copy()
             disp_ti.index = disp_ti.index.strftime('%Y/%m/%d')
             st.dataframe(
@@ -1494,11 +1494,11 @@ with tab2:
         with m4:
             # 融資增 + 股價漲 → 正常多頭；融資減 + 股價漲 → 籌碼乾淨
             if mg_chg < 0:
-                st.metric("籌碼狀態", "🟢 融資減少", "籌碼趨於乾淨")
+                st.metric("籌碼狀態", "?? 融資減少", "籌碼趨於乾淨")
             elif mg_chg > 0:
-                st.metric("籌碼狀態", "🟡 融資增加", "留意追高風險")
+                st.metric("籌碼狀態", "?? 融資增加", "留意追高風險")
             else:
-                st.metric("籌碼狀態", "⚪ 持平", "")
+                st.metric("籌碼狀態", "? 持平", "")
 
         # 雙軸圖：融資餘額 + 融券餘額
         fig_mg = make_subplots(specs=[[{"secondary_y": True}]])
@@ -1527,16 +1527,16 @@ with tab2:
 
         # 研判說明
         if mg_chg < 0 and sg_chg <= 0:
-            st.success("🟢 融資減少且融券未明顯增加，籌碼逐漸乾淨，若股價同步止跌，"
+            st.success("?? 融資減少且融券未明顯增加，籌碼逐漸乾淨，若股價同步止跌，"
                        "為**吸籌訊號**，低點可信度提升。")
         elif mg_chg < 0 and sg_chg > 0:
-            st.warning("⚠️ 融資減少同時融券增加（軋空佈局），市場分歧加大，"
+            st.warning("?? 融資減少同時融券增加（軋空佈局），市場分歧加大，"
                        "需觀察誰先認輸。若股價上漲，融券回補可能帶來短線急漲。")
         elif mg_chg > 0 and sg_chg > 0:
-            st.info("🟡 融資與融券同步增加，多空雙方皆在加碼，方向待確認，"
+            st.info("?? 融資與融券同步增加，多空雙方皆在加碼，方向待確認，"
                     "避免追高或追空。")
         elif mg_chg > 0 and sg_chg <= 0:
-            st.info("🟡 融資增加，散戶追多積極，需留意過度槓桿風險。"
+            st.info("?? 融資增加，散戶追多積極，需留意過度槓桿風險。"
                     "若外資同步買超則訊號較可信，否則需謹慎。")
 
         st.caption(f"融券覆蓋率（{cover*100:.1f}%）：融券張數 ÷ 融資張數。"
@@ -1594,24 +1594,24 @@ with tab3:
         # 研判說明
         if fo_foreign > 0 and fo_total > 0:
             st.success(
-                f"🟢 外資台指期**淨多** {fo_foreign:+,} 口（近日變化 {fo_chg['外資']:+,} 口），"
+                f"?? 外資台指期**淨多** {fo_foreign:+,} 口（近日變化 {fo_chg['外資']:+,} 口），"
                 f"三大法人合計淨多 {fo_total:+,} 口。外資通常是方向性最強的法人，"
                 f"多口佈局代表對後市看多。"
             )
         elif fo_foreign < 0 and fo_total < 0:
             st.error(
-                f"🔴 外資台指期**淨空** {fo_foreign:+,} 口（近日變化 {fo_chg['外資']:+,} 口），"
+                f"?? 外資台指期**淨空** {fo_foreign:+,} 口（近日變化 {fo_chg['外資']:+,} 口），"
                 f"三大法人合計淨空 {fo_total:+,} 口。法人整體偏空，"
                 f"搭配現貨訊號需更謹慎。"
             )
         elif fo_foreign > 0 and fo_total < 0:
             st.info(
-                f"🟡 外資淨多 {fo_foreign:+,} 口，但自營商或投信拉低合計至 {fo_total:+,} 口。"
+                f"?? 外資淨多 {fo_foreign:+,} 口，但自營商或投信拉低合計至 {fo_total:+,} 口。"
                 f"法人看法分歧，以外資方向為主要參考。"
             )
         else:
             st.info(
-                f"🟡 外資淨空 {fo_foreign:+,} 口，但整體法人合計 {fo_total:+,} 口。"
+                f"?? 外資淨空 {fo_foreign:+,} 口，但整體法人合計 {fo_total:+,} 口。"
                 f"請搭配現貨外資動向綜合判斷。"
             )
 
@@ -1621,7 +1621,7 @@ with tab3:
             "資料來源：FinMind（TaiwanFuturesInstitutionalInvestors，商品代碼 TX）"
         )
 
-        with st.expander("📋 近60日明細"):
+        with st.expander("?? 近60日明細"):
             disp_fo = fo_df.copy()
             disp_fo.index = disp_fo.index.strftime('%Y/%m/%d')
             st.dataframe(
