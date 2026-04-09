@@ -1430,7 +1430,7 @@ with tab1:
             val    = ti_sum[key]['total']
             consec = ti_sum[key]['consec']
             delta  = f"連{consec}日買超" if consec >= 2 else ("今日買超" if consec == 1 else "連續賣超")
-            col_w.metric(label, f"{val:+,} 張", delta)
+            col_w.metric(label, f"{val:+,} 億元", delta)
 
         st.markdown("")
 
@@ -1449,7 +1449,7 @@ with tab1:
             height=320, barmode='group', hovermode='x unified',
             legend=dict(orientation='h', y=1.02),
             margin=dict(l=50, r=20, t=30, b=40),
-            yaxis_title='買賣超（張）',
+            yaxis_title='買賣超（億元）',
         )
         fig_ti.update_xaxes(gridcolor='#21262d')
         fig_ti.update_yaxes(gridcolor='#21262d', zeroline=True, zerolinecolor='#555')
@@ -1501,8 +1501,8 @@ with tab2:
 
         m1, m2, m3, m4 = st.columns(4)
         with m1:
-            val = int(mb.iloc[-1]) if not mb.empty else 0
-            st.metric("融資餘額（張）", f"{val:,}", f"近5日 {mg_chg:+,}")
+            val = float(mb.iloc[-1]) if not mb.empty else 0
+            st.metric("融資餘額（億元）", f"{val:.1f}", f"近5日 {mg_chg:+.1f}")
         with m2:
             val = int(sb.iloc[-1]) if not sb.empty else 0
             st.metric("融券餘額（張）", f"{val:,}", f"近5日 {sg_chg:+,}")
@@ -1522,13 +1522,13 @@ with tab2:
         fig_mg = make_subplots(specs=[[{"secondary_y": True}]])
         if not mb.empty:
             fig_mg.add_trace(go.Scatter(
-                x=mb.index, y=mb, name='融資餘額',
+                x=mb.index, y=mb, name='融資餘額 (億)',
                 line=dict(color='#ff6b6b', width=2),
                 fill='tozeroy', fillcolor='rgba(255,107,107,0.08)',
             ), secondary_y=False)
         if not sb.empty:
             fig_mg.add_trace(go.Bar(
-                x=sb.index, y=sb, name='融券餘額',
+                x=sb.index, y=sb, name='融券餘額 (張)',
                 marker_color='rgba(69,170,242,0.55)',
             ), secondary_y=True)
 
@@ -1538,7 +1538,7 @@ with tab2:
             legend=dict(orientation='h', y=1.02),
             margin=dict(l=60, r=60, t=30, b=40),
         )
-        fig_mg.update_yaxes(title_text='融資餘額（張）', gridcolor='#21262d', secondary_y=False)
+        fig_mg.update_yaxes(title_text='融資餘額（億元）', gridcolor='#21262d', secondary_y=False)
         fig_mg.update_yaxes(title_text='融券餘額（張）', gridcolor='#21262d', secondary_y=True)
         fig_mg.update_xaxes(gridcolor='#21262d')
         st.plotly_chart(fig_mg, width='stretch')
